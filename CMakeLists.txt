@@ -49,3 +49,14 @@ if(TW_SANITIZER MATCHES "thread")
   set_tests_properties(tsan_detects_race PROPERTIES
     PASS_REGULAR_EXPRESSION "data race")
 endif()
+
+add_executable(digest_dump_a tools/digest_dump.cpp)
+target_link_libraries(digest_dump_a PRIVATE libsim)
+
+add_executable(digest_dump_b tools/digest_dump.cpp)
+target_link_libraries(digest_dump_b PRIVATE libsim)
+
+add_test(NAME determinism_two_binaries
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/determinism-test.sh"
+          "$<TARGET_FILE:digest_dump_a>" "$<TARGET_FILE:digest_dump_b>"
+          "${CMAKE_SOURCE_DIR}/scripts/compare-digests.sh")
