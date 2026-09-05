@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IMAGE=tickwire-dev:gcc10-cmake3.28.4
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$(dirname "$0")/.."
+exec docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD":/work -w /work \
+  "$IMAGE" "$@"
