@@ -25,12 +25,30 @@ Project design doc: [`docs/specs/2026-09-04-tickwire-design.md`](specs/2026-09-0
 
 ## 2. Turning a spec into an implementation plan
 
-**Default path: `writing-plans` → `executing-plans`.** For anything substantial —
-a phase, a real feature — write the task/step plan first, then execute it. You get
-a reviewable artifact before code starts, and commit boundaries are fixed in the
-plan rather than decided ad hoc mid-session.
+**Two layers, don't confuse them.** `/impl-plan` is the *architectural* layer: run
+once per project (or per major subsystem) to resolve open design questions and
+produce the phase table. `writing-plans` is the *execution* layer: run once per
+phase, right before that phase's branch starts, to break one phase into numbered
+tasks with exact files, interfaces, and test → implement → verify → commit steps.
+**Don't re-run `/impl-plan` per phase.**
+
+> **Status: `/impl-plan` has NOT been run for Tickwire.** The P0–P7 table currently
+> exists only as a table inside the design doc. It needs to become a real
+> implementation plan that resolves the open architectural questions before P0's
+> phase plan is written — `libsim`'s exact API surface and link model, fixed-point
+> vs floats, the transport interface shape, and the queue's memory-ordering
+> contract. Those are architecture, not execution, and answering them inside a
+> phase plan is how they get answered badly.
 
 Plans live in **`docs/plans/`**, named `YYYY-MM-DD-phase-N-slug.md`.
+
+| Situation | Use |
+|---|---|
+| Spec is approved, need the phase table and the open architectural questions resolved | `/impl-plan` command — restates requirements, assesses risk, produces a step-by-step plan, **waits for CONFIRM before touching code** (renamed from `/plan` to avoid colliding with Claude Code's built-in Plan Mode) |
+| About to start a phase from the plan's phase table, need it broken into committable tasks | `writing-plans` skill → saves to `docs/plans/` → hands off to `executing-plans` |
+| Building a standalone feature that was never one of the phases | `writing-plans` directly — no need to route through `/impl-plan` unless it raises genuinely new architectural questions |
+| Plan needs deeper multi-file architectural reasoning first | `planner` agent, or `code-architect` once there's code to pattern-match against |
+| End-to-end gated build as one wrapped flow, no standalone plan artifact wanted | the `orch-*` commands — the alternative to `writing-plans` when a reviewable plan isn't needed |
 
 **Undecided, deliberately:** the spec-driven vs code-driven plan format. CallIt
 decided spec-driven because it executes inline. Tickwire has `delegating-plan-tasks`
