@@ -27,3 +27,11 @@ enable_testing()
 add_executable(smoke_test tests/smoke_test.cpp)
 target_link_libraries(smoke_test PRIVATE libsim GTest::gtest_main)
 add_test(NAME smoke_test COMMAND smoke_test)
+
+if(TW_SANITIZER MATCHES "address")
+  add_executable(fault_uaf tests/faults/uaf.cpp)
+  target_link_libraries(fault_uaf PRIVATE tickwire_sim_flags)
+  add_test(NAME asan_detects_uaf COMMAND fault_uaf)
+  set_tests_properties(asan_detects_uaf PROPERTIES
+    PASS_REGULAR_EXPRESSION "heap-use-after-free")
+endif()
