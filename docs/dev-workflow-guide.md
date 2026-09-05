@@ -227,6 +227,7 @@ needed.
 | Situation | Use |
 |---|---|
 | End-of-session log | `journal` skill, or hand-written — decide per session |
+| A decision got made, reversed, or something surprised us running the toolchain | [`docs/project-history.md`](project-history.md) — the skimmable cross-phase timeline. Distinct from the journal (session narrative) and the specs (full rationale) — this is the short version, one entry per load-bearing event, linking back to the source doc instead of restating it. |
 | Updating README/codemaps | `doc-updater` agent |
 
 ## 8. Git & shipping
