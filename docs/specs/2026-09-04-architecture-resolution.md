@@ -43,7 +43,7 @@ graph, not by discipline**:
 ```cmake
 add_library(tickwire_sim_flags INTERFACE)
 target_compile_options(tickwire_sim_flags INTERFACE
-    -march=x86-64-v2          # pinned; NEVER -march=native
+    -march=x86-64             # pinned baseline; NEVER -march=native
     -ffp-contract=off)        # defense in depth
 target_compile_features(tickwire_sim_flags INTERFACE cxx_std_20)
 
@@ -215,7 +215,26 @@ compilers.
 | `std::jthread` / `std::span` / concepts | **YES** (all three) |
 | `std::format` | NO — expected; use **fmtlib** |
 | ASan + UBSan | **OK** |
-| `cmake` | **absent from the image** — the derived Dockerfile must add it |
+| `cmake` | **absent from the image** — the derived Dockerfile must add it, and must **pin ≥ 3.21**; see below |
+
+### CMake ≥ 3.21 is a correctness requirement, not polish
+
+Debian 11 ships **CMake 3.18.4**. On 3.18, `ctest --test-dir <dir>` — the exact
+scoped command the dev-workflow guide § 6 prescribes for every checkpoint —
+**does not exist**, and ctest does not error on it. It runs **zero tests, prints
+`No tests were found!!!`, and exits 0.**
+
+Measured. Every TDD checkpoint would report green having executed nothing.
+
+This reverses the design doc's "presets are polish" conclusion, which was
+correct *for the host* (CMake 3.16, unupgradable without sudo) and wrong for a
+container we control. **Pin CMake 3.28.4 in the image** via the Kitware release
+tarball (`gcc:10` has no `pip3`). Verified: `cmake 3.28.4`, `--test-dir`
+supported. This also restores `CMakePresets.json` (3.21+) as genuinely available.
+
+**The workflow guide's test command is therefore valid — but only because the
+image pins CMake.** The two are coupled; changing the image's CMake floor breaks
+the documented convention silently.
 
 ### TSan needs a specific invocation — record it or it will look broken
 
@@ -262,8 +281,22 @@ Discovering it a third time costs another session.
   dependencies (`libgl1-mesa-dev`, `libx11-dev`, `libxrandr-dev`, `libxi-dev`,
   `libxcursor-dev`, `libxinerama-dev`) are **already installed on the host**, but
   must be added to the Dockerfile if the client builds in the container.
+- **`-march=x86-64-v2` does not compile on GCC 10** — micro-architecture levels
+  (`v2`/`v3`/`v4`) were added in GCC 11. Caught by an actual build, not review.
+  Valid values here: `x86-64` (chosen), or named micro-architectures such as
+  `nehalem`, `haswell`.
+- **`ctest --test-dir` is a silent false-green on Debian's CMake 3.18** — see the
+  CMake floor section above. This is why the image pins 3.28.4.
+- **`gcc:10` is Debian 11 with CMake 3.18.4 and git 2.30.2, and has no `pip3`** —
+  so a newer CMake comes from the Kitware release tarball, not pip.
+- **All three sanitizers actively detect their bug classes** in the pinned image,
+  verified with deliberate faults: ASan caught a heap-use-after-free, UBSan a
+  signed-integer overflow, TSan a data race (under `setarch -R`). This is what
+  makes the "prove the sanitizer is live" tests in P0 worth writing — a
+  configured-but-inactive sanitizer is otherwise indistinguishable from a clean run.
 - **GitHub is reachable**, so `FetchContent` for GoogleTest/fmtlib/raylib works
-  at configure time.
+  at configure time. Verified end to end: GoogleTest `release-1.12.1` fetched,
+  built, and ran green inside the container.
 - **`recvmmsg`/`sendmmsg` compile** against glibc 2.31.
 - **16 cores available** — ample for room threads plus affinity pinning.
 
@@ -271,7 +304,10 @@ Discovering it a third time costs another session.
 
 Replaces "`sudo apt install g++-10`":
 
-1. Write `Dockerfile` — `FROM gcc:10`, add `cmake`, `git`, raylib's X11/GL deps.
+1. Write `Dockerfile` — `FROM gcc:10`, add **CMake 3.28.4 from the Kitware
+   release tarball** (not apt — Debian's 3.18 is a silent false-green; no `pip3`
+   in the image), `ninja-build`, `util-linux` (for `setarch`), and raylib's
+   X11/GL deps.
 2. Write the run wrapper carrying `--cap-add SYS_PTRACE`,
    `--security-opt seccomp=unconfined`, `--user $(id -u):$(id -g)`.
 3. Prove the toolchain **inside** the container: C++20 compiles, and **all three
@@ -288,7 +324,7 @@ hand, but it is **unverified for TSan** and leaves CI pinning unsolved.
 |---|---|---|
 | raylib client cannot get a display from the container | Medium | Validate at P2; fallback is host build of the renderer only |
 | TSan invocation gets lost and TSan looks broken again | Medium | Bake into CTest config in P0 — the reason this section exists |
-| `-march=x86-64-v2` is wrong for the target CPU | Low | Any explicit value works; the requirement is that it is pinned and uniform |
+| The pinned `-march` value is unsupported by the pinned compiler | Resolved | Was real: `x86-64-v2` **does not exist in GCC 10** (micro-arch levels landed in GCC 11) and failed the build. Now `-march=x86-64` — verified to compile, and baseline x86-64 has no FMA at all, so it closes the contraction hazard by itself |
 | `kMaxPlayers = 32` proves too small for the demo | Low | P4's snapshot delta is the designed answer; 48 is the full-snapshot ceiling |
 | Container adds friction that erodes the habit | Medium | Wrapper script from day one; never type raw `docker run` |
 
@@ -296,5 +332,5 @@ hand, but it is **unverified for TSan** and leaves CI pinning unsolved.
 
 - **P7's WebSocket gateway** vs the README GIF. No information available until
   the demo exists; deciding now would be guessing.
-- **Exact `-march` value.** Pin one before P0's first commit; `x86-64-v2` is a
-  safe default. The decision that matters is *pinned and uniform*, not *which*.
+*(The `-march` value is no longer open — see the risks table. `x86-64` is
+decided and verified.)*
