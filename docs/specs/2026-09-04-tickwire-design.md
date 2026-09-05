@@ -1,6 +1,7 @@
 # Tickwire — netcode you can see working
 
-**Status:** picked, not started · **Captured:** 2026-09-04
+**Status:** picked, not started · **Captured:** 2026-09-04 · **Revised:** 2026-09-04 after a machine check
+**Live spec.** The copy in `~/projects/project idea/` is the historical idea record; this is the one `/impl-plan` consumes.
 **Category:** C++ systems — *not* part of the RAG idea set below, different resume track.
 **Siblings (RAG track, shelved):** [spoiler-firewall.md](spoiler-firewall.md) ·
 [filing-drift.md](filing-drift.md) · [comment-letters.md](comment-letters.md) ·
@@ -99,7 +100,7 @@ the injectable transport below) — one abstraction, two payoffs.
 
 | Requirement | How it is earned | Real? |
 |---|---|---|
-| **C++20** | `std::jthread` + `stop_token`; `std::span`/`string_view` for zero-copy parsing; concepts on the transport and queue interfaces; `std::format` | Real — the shutdown path can't be written this cleanly in C++11 |
+| **C++20** | `std::jthread` + `stop_token`; `std::span`/`string_view` for zero-copy parsing; concepts on the transport and queue interfaces. **Not `std::format`** — needs GCC 13, unavailable here; use **fmtlib** and say so | Real — the shutdown path can't be written this cleanly in C++11. **Requires g++-10; see Toolchain** |
 | **CMake** | Target-based, `FetchContent` for GoogleTest, `CMakePresets.json`, sanitizer configs, `-Wall -Wextra -Werror` from commit one | Real if target-based |
 | **POSIX sockets** | `socket`/`bind`, `recvmmsg`/`sendmmsg`, `O_NONBLOCK`, `EAGAIN`. **No Boost.Asio, no libevent** — they exist to hide exactly what is being demonstrated | Real, and an upgrade on `select()` |
 | **pthreads / jthread** | `jthread` for room threads; `pthread_setaffinity_np` for CPU pinning, `pthread_setname_np` for readable `perf`/`gdb` output | Real — pinning genuinely cuts p99 variance |
@@ -108,6 +109,39 @@ the injectable transport below) — one abstraction, two payoffs.
 
 **Deleting Group Chat Server deletes the `pthreads` keyword** — it is the only
 entry in the bank carrying it. The affinity/naming calls above reclaim it honestly.
+
+## Toolchain — verified on this machine 2026-09-04
+
+**The default toolchain cannot build this project.** Verified, not assumed:
+
+| Requirement | Default (GCC 9.4.0) | After `g++-10` |
+|---|---|---|
+| `-std=c++20` | ✗ rejected — only `-std=c++2a` | ✓ |
+| `std::jthread` / `stop_token` | ✗ | ✓ |
+| `std::span` | ✗ | ✓ |
+| concepts | ✗ (`__cpp_concepts` undefined) | ✓ |
+| `std::format` | ✗ | ✗ — needs GCC 13. **Use fmtlib** |
+| **TSan** | ✗ `cannot find libtsan_preinit.o` | ✓ |
+| ASan / UBSan | ✓ | ✓ |
+
+**TSan is the serious one** — a clean TSan run is this project's central
+correctness claim. Root cause: the installed `libtsan0` is the **GCC-10** build
+(10.5.0) while the default compiler is GCC 9, so GCC 9's driver looks for a
+runtime that was never installed for it.
+
+**Fix — P0 task zero, before anything else:** `sudo apt install g++-10`
+(in sources at `10.5.0-1ubuntu1~20.04`; `libtsan0`, `libasan6`, `libubsan1`
+are already present at that version). CMake 3.16.3 does everything
+load-bearing — `FetchContent` (3.11+), target-based linking, sanitizer
+configs — so **`CMakePresets.json` is polish, not a requirement**; upgrade via
+`pip3` or `snap` only if wanted (presets need 3.19+, v3 schema 3.21+).
+
+**Pin the compiler version explicitly in CI.** GitHub Actions' `ubuntu-latest`
+ships a far newer GCC than 10.5.0. Since this project's correctness rests on
+bit-identical float behaviour between separately built binaries, letting CI
+inherit the runner's compiler reintroduces the divergence class the `libsim`
+flag rules exist to close — from a different direction. A pinned dev container
+would make local and CI provably identical; decide at `/impl-plan` time.
 
 ## Architecture — settled
 
@@ -152,11 +186,58 @@ oscillates. With `libsim`, a prediction divergence is *by construction* a networ
 or tick-sync bug, never a math discrepancy — which collapses the P3 debugging
 surface, and P3 is the phase most likely to kill this project.
 
-Pin float behaviour on this target: **`-ffp-contract=off`** plus identical float
-flags for every consumer. GCC contracts `a*b+c` into an FMA at `-O2`/`-O3` but
-not `-O0`, so without this the Debug/sanitizer build and the Release build
-compute different results — and client and server are *separate binaries*, so
-they can diverge from rounding alone while both are "correct."
+**Pin one explicit `-march` across every target and configuration, and never
+use `-march=native`.** `-ffp-contract=off` on top, as defense in depth.
+
+This is the corrected rule. Measured on this machine (objdump for `vfmadd`):
+
+| Flags | FMA emitted |
+|---|---|
+| `-O2` | 0 |
+| `-O2 -march=native` | **1** |
+| `-O2 -march=native -ffp-contract=off` | 0 |
+
+Contraction only happens when the target actually *has* FMA — the baseline
+x86-64 target has no FMA instruction to contract into. So the real determinism
+hazard is **`-march=native`**, exactly the flag someone adds to a Release
+build for benchmark speed, and exactly the build whose numbers are the
+deliverable. Client and server are separate binaries; they can diverge from
+rounding alone while both are "correct."
+
+*Caveat, deliberately not overstated: this demonstrates an instruction-selection
+difference, not an observed numerical divergence. Attempts to construct
+differing values did not expose one.*
+
+There is no `-fno-fast-math` to add — fast-math is **off by default**. The rule
+is simply never to add `-ffast-math`.
+
+### Interface contracts — hand off by index, never by value
+
+The zero-allocation rule below is an **interface** constraint, not just an
+allocator choice. Three shapes are forbidden because each silently violates it:
+
+| Forbidden | Why |
+|---|---|
+| `receive() -> optional<pair<Endpoint, vector<byte>>>` | allocates per packet |
+| `SpscRing::push(T v)` / `try_pop() -> optional<T>` | copies ~1200 bytes per hop — **P5's mutex-vs-lock-free benchmark would measure `memcpy`, not synchronization**, and the benchmark is the deliverable |
+| `WorldSnapshot { vector<PlayerState> }` | allocates inside `libsim`, which declares no allocation |
+
+All three must hand off an **index or a `span` into a preallocated slot**.
+
+**`SpscRing`'s contract must be stated, not implied:** fixed power-of-two
+capacity, index masking, and whether indices are monotonic or wrapped — these
+determine the ordering guarantee and cannot be left to the implementer.
+
+**`Endpoint { uint32_t addr }` commits to IPv4.** Fine, but state it as a
+decision rather than letting it be discovered.
+
+### The determinism test needs two binaries, not two builds
+
+"Two separately-compiled instances of `libsim` (Debug and Release) in one test
+binary" is an **ODR violation** and will not build. It has to be **two
+executables plus a CTest fixture** that runs both and compares output. A cold
+executing window — which the workflow guide requires to run without
+conversation history — hits this in minute one.
 
 ### Injectable transport — built at P1, not retrofitted
 
@@ -166,6 +247,11 @@ simulated one injecting configurable latency, jitter, loss and reordering.
 You cannot unit-test packet loss against a real socket. This makes netcode tests
 deterministic **and** powers the latency slider demo — one abstraction, both
 payoffs, plus a legitimate C++20 concepts use.
+
+**`SimulatedTransport` is only deterministic if it is specified to be.** It needs
+a **seeded PRNG** (never `random_device`) and an **injected tick source** to
+schedule delayed delivery. Without both, "deterministic simulated transport" is
+a claim the implementation cannot honor.
 
 ### Packet handling
 
@@ -196,10 +282,10 @@ complete project.
 
 | Phase | Scope | Risk |
 |---|---|---|
-| **P0** | Skeleton: CMake, GoogleTest, CI, three sanitizer configs, on an empty binary | Low — but do it *first*, on purpose |
-| **P1** | Wire protocol, serialization, **injectable transport** | Low |
+| **P0** | **Task zero: install and pin `g++-10`, verify TSan links.** Then skeleton: CMake, GoogleTest, CI, three sanitizer configs, on an empty binary | Low — but do it *first*, on purpose |
+| **P1** | Wire protocol, serialization, **injectable transport**. **Header must carry tick / timestamp / ack fields** — see below | Medium — the wire format is frozen here |
 | **P2** | Authoritative server, single-threaded. Visibly laggy, and that's correct. **First demoable thing** | Medium — scope creep |
-| **P3** | Client prediction + reconciliation + clock sync | **HIGHEST — this is where it dies** |
+| **P3** | Client prediction + reconciliation + clock-sync *logic* (fields already reserved at P1) | **HIGHEST — this is where it dies** |
 | **P4** | Entity interpolation + snapshot delta | Medium |
 | **P5** | Threading + queue benchmark | Medium — lock-free memory ordering is subtle |
 | **P6** | Lag compensation (server rewind) | High, but localized and additive |
@@ -215,6 +301,12 @@ localized ("hit registered at the wrong position"). P3 also hides an unlisted
 subsystem: **clock synchronization** — prediction requires the client to estimate
 server tick and deliberately run *ahead*, meaning RTT estimation and drift
 correction.
+
+**But clock sync is a P1 decision, not a P3 one.** RTT estimation and drift
+correction need **tick, timestamp and ack fields in the packet header**. If P1
+freezes the wire format without them, P3 must reopen the protocol — the exact
+"answered badly inside a phase plan" failure the `/impl-plan` layer exists to
+prevent. Reserve the fields at P1; implement the logic at P3.
 
 ## The headline artifact
 
@@ -252,16 +344,37 @@ deterministic replay tests, a measured queue comparison, and `libsim` guaranteei
 client/server agreement. That has to be the pitch. Gemini claimed "top 1%
 saturation" — that is a fabricated statistic and must never reach a README.
 
-## Open questions
+## Open questions — inputs for `/impl-plan`
 
-- Fixed-point vs floats — starting with floats plus pinned flags; revisit if P3
-  reconciliation proves unstable.
+These are architectural and span phases. `/impl-plan` resolves them **once**,
+before P0's phase plan is written; answering them inside a phase plan is how
+they get answered badly.
+
+- **Fixed-point vs floats.** Starting with floats plus pinned `-march` and
+  `-ffp-contract=off`; revisit if P3 reconciliation proves unstable. Fixed-point
+  removes the whole hazard class by construction — the cost is vector
+  normalization (sqrt).
+- **`libsim`'s exact API surface and link model** — static library, and which
+  types cross the boundary.
+- **The transport interface's shape.** Built at P1 but constrains P3 and the
+  demo.
+- **`SpscRing`'s ordering contract** — capacity, masking, monotonic vs wrapped
+  indices, and the memory-ordering guarantee.
+- **Pinned dev container, yes or no.** The cheapest way to make local and CI
+  provably identical given the toolchain findings above.
 - Whether P7's WebSocket gateway is worth building for shareability, or whether
   the GIF is genuinely sufficient.
 
 ## Day one
 
-**Start with P0.** It is the least interesting phase and the one most likely to
+**`sudo apt install g++-10`, then verify TSan links.** Nothing in this document
+builds until that is done, and the project's central correctness claim is dead
+until TSan runs.
+
+**Then `/impl-plan`** — the phase table above is a table, not an implementation
+plan, and the open questions above are its inputs.
+
+**Then P0.** It is the least interesting phase and the one most likely to
 derail the project if hit later while also debugging netcode.
 
 Read the canonical references **before P3, not during**: Glenn Fiedler's
