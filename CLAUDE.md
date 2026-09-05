@@ -1,7 +1,20 @@
 # Tickwire — Project Conventions
 
-Verified constraints from P0. Every rule here was hit as a real failure during
-toolchain verification or plan execution, not assumed.
+## Project Overview
+
+Tickwire is a C++20 authoritative multiplayer game server: raw UDP, a
+fixed-tick deterministic simulation core (`libsim`), client-side prediction,
+server reconciliation, and lag compensation. The deliverable is a measurable
+numbers table (tick jitter percentiles, concurrent players before jitter
+exceeds budget, queue handoff latency, packet throughput) plus a working
+local demo — not just a running server. See the design doc (linked below) for
+the full phase table and rationale; see `docs/project-history.md` for what's
+changed or been discovered since.
+
+## Verified constraints
+
+Every rule below was hit as a real failure during toolchain verification or
+plan execution, not assumed.
 
 ## Build and test
 
@@ -84,7 +97,31 @@ separate line. `git add` names exact paths; **never** `git add -A` or
 
 200–400 lines typical, 800 hard maximum.
 
+## Workflow
+
+Full detail lives in [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md)
+— this is the quick-reference version.
+
+| Situation | Use |
+|---|---|
+| Resolve open architectural questions before writing a phase plan | `/impl-plan` |
+| Break an approved phase into committable tasks | `writing-plans` skill → `docs/plans/` |
+| Execute a phase plan task-by-task | `executing-plans` skill |
+| Build/compile errors | `/build-fix`, or the `cpp-build-resolver` agent |
+| Fix a bug — reproduce as a failing test first | `/orch-fix-defect` |
+| Behavior-preserving refactor | `/orch-refine-code` |
+| General code review | `/code-review` command / `code-reviewer` agent |
+| C++ idiom, RAII, lifetime, move-semantics review | `cpp-reviewer` agent |
+| **Any phase touching the network surface** | `security-review` skill / `security-reviewer` agent — **mandatory**, not optional |
+| Remove dead code | `/refactor-clean` |
+| Scan for leaked secrets before pushing | `/security-scan` |
+| Finish a phase branch | `finishing-a-development-branch` skill |
+| Log a session | `journal` skill |
+| Record a decision, pivot, or finding | `docs/project-history.md` |
+
 ## Specs
 
 - [`docs/specs/2026-09-04-tickwire-design.md`](docs/specs/2026-09-04-tickwire-design.md) — the design
 - [`docs/specs/2026-09-04-architecture-resolution.md`](docs/specs/2026-09-04-architecture-resolution.md) — authoritative for every architectural decision
+- [`docs/project-history.md`](docs/project-history.md) — cross-phase decisions, pivots, and findings
+- [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md) — full tool/skill/agent reference by situation
