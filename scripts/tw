@@ -2,7 +2,12 @@
 set -euo pipefail
 IMAGE=tickwire-dev:gcc10-cmake3.28.4
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$(dirname "$0")/.."
+# Without these caps, TSan aborts with "unexpected memory mapping"; without
+# --user, the bind mount writes root-owned files onto the host. setarch -R
+# alone is not sufficient - it still fails with "Operation not permitted"
+# unless the container is also granted these capabilities.
 exec docker run --rm \
+  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
   --user "$(id -u):$(id -g)" \
   -v "$PWD":/work -w /work \
   "$IMAGE" "$@"

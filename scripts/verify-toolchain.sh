@@ -38,3 +38,19 @@ echo "OK: cmake version $cmake_version >= 3.21"
 # Check 4: setarch must be available (required to run TSan binaries).
 command -v setarch >/dev/null 2>&1 || fail "setarch not found on PATH"
 echo "OK: setarch is available"
+
+# Check 5: a TSan binary must actually run under setarch -R (proves the
+# container has the capabilities TSan needs at runtime, not just at compile time).
+cat > "$probe_dir/race.cpp" <<'EOF'
+#include <thread>
+int main() {
+  std::thread t([] {});
+  t.join();
+  return 0;
+}
+EOF
+g++ -std=c++20 -fsanitize=thread -o "$probe_dir/race" "$probe_dir/race.cpp" \
+  || fail "TSan probe failed to compile"
+setarch -R "$probe_dir/race" \
+  || fail "TSan probe failed to run under setarch -R"
+echo "OK: TSan probe runs under setarch -R"
