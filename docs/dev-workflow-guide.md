@@ -106,18 +106,18 @@ and `cpp-testing` skills; `cpp-reviewer` and `cpp-build-resolver` agents;
 |---|---|
 | **Building a phase (the default)** | `writing-plans` → `executing-plans` |
 | Any new feature/bug fix — write-tests-first | `tdd-guide` agent (RED → GREEN → IMPROVE) |
-| Fixing a bug — reproduce as a failing test first | `orch-fix-defect` |
-| Behavior-preserving refactor | `orch-refine-code` |
-| Build/compile errors block progress | `build-fix` skill, or the **`cpp-build-resolver`** agent |
-| Removing dead code | `refactor-clean` / `refactor-cleaner` |
+| Fixing a bug — reproduce as a failing test first | `/orch-fix-defect` command |
+| Behavior-preserving refactor | `/orch-refine-code` command |
+| Build/compile errors block progress | `/build-fix` command, or the **`cpp-build-resolver`** agent |
+| Removing dead code | `/refactor-clean` command / `refactor-cleaner` agent |
 
 ## 5. Review (before every merge to `dev`)
 
 | Situation | Use |
 |---|---|
-| General quality review after writing code | `code-review` skill / `code-reviewer` agent |
+| General quality review after writing code | `/code-review` command / `code-reviewer` agent |
 | **C++ idiom, RAII, lifetime, move-semantics review** | **`cpp-reviewer` agent** |
-| **Any phase touching the network surface** | **`security-reviewer` agent — mandatory.** The UDP deserializer parses untrusted input from an unauthenticated source; a malformed packet reaching a hand-rolled parser is this project's highest-severity surface. |
+| **Any phase touching the network surface** | **`security-review` skill and/or the `security-reviewer` agent — mandatory.** The UDP deserializer parses untrusted input from an unauthenticated source; a malformed packet reaching a hand-rolled parser is this project's highest-severity surface. |
 | Swallowed errors / bad fallbacks | `silent-failure-hunter` agent |
 | Type/struct design enforcing invariants | `type-design-analyzer` agent |
 | Comment accuracy/rot | `comment-analyzer` agent |
@@ -168,7 +168,7 @@ Sub-task-level branching was considered and rejected as overhead for solo work.
 | Committing | `type: description` per `.claude/rules/ecc/common/git-workflow.md`, one commit per checkpoint |
 | Finishing a phase | `finishing-a-development-branch` skill |
 | Opening a PR | Not used — solo, self-merge |
-| Scanning for leaked secrets before pushing | `security-scan` skill |
+| Scanning for leaked secrets before pushing | `/security-scan` command |
 
 **One commit per checkpoint, chained behind its test with `&&`** so a red test makes
 the commit unreachable rather than merely inadvisable. Never `;`, never separate

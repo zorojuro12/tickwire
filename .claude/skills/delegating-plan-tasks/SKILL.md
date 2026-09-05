@@ -260,10 +260,12 @@ down rather than retrying with a tweak.
 
 ## Portability
 
-This is the CallIt copy. The four rules, the cost model, the return
-contract, and the escalation posture are **portable** — they are rules. The
-`tok/CP` figures, the Go test commands, the `dev` branch, and the Phase 5b
-example are **values** and stay here.
+This is the Tickwire copy, carried from CallIt. The four rules, the cost
+model, the return contract, and the escalation posture are **portable** — they
+are rules. The `tok/CP` figures, the test commands, the `dev` branch, and the
+worked example are **values**; the examples still reference CallIt's Go phases
+and should be re-grounded in a Tickwire phase the first time this skill is
+actually used.
 
 If a rule changes, carry it to `~/projects/claude-skills/`; if a value
 changes, it stays. See `docs/dev-workflow-guide.md` §9 for the full split.
