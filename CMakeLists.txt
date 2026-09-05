@@ -34,4 +34,10 @@ if(TW_SANITIZER MATCHES "address")
   add_test(NAME asan_detects_uaf COMMAND fault_uaf)
   set_tests_properties(asan_detects_uaf PROPERTIES
     PASS_REGULAR_EXPRESSION "heap-use-after-free")
+
+  add_executable(fault_ovf tests/faults/ovf.cpp)
+  target_link_libraries(fault_ovf PRIVATE tickwire_sim_flags)
+  add_test(NAME ubsan_detects_overflow COMMAND fault_ovf)
+  set_tests_properties(ubsan_detects_overflow PROPERTIES
+    PASS_REGULAR_EXPRESSION "signed integer overflow")
 endif()
