@@ -41,3 +41,11 @@ if(TW_SANITIZER MATCHES "address")
   set_tests_properties(ubsan_detects_overflow PROPERTIES
     PASS_REGULAR_EXPRESSION "signed integer overflow")
 endif()
+
+if(TW_SANITIZER MATCHES "thread")
+  add_executable(fault_race tests/faults/race.cpp)
+  target_link_libraries(fault_race PRIVATE tickwire_sim_flags)
+  add_test(NAME tsan_detects_race COMMAND fault_race)
+  set_tests_properties(tsan_detects_race PROPERTIES
+    PASS_REGULAR_EXPRESSION "data race")
+endif()
