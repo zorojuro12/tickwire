@@ -120,6 +120,22 @@ TEST(UdpTransportTest, SendRejectsPayloadsOverKMaxPacket) {
   EXPECT_FALSE(pollReceive(b, slot, 100));
 }
 
+TEST(UdpTransportTest, RebindingClosesThePreviousSocket) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+
+  UdpTransport t;
+  ASSERT_TRUE(t.bind(loopback_be, 0));
+  const int first_fd = t.nativeHandle();
+
+  ASSERT_TRUE(t.bind(loopback_be, 0));
+  const int second_fd = t.nativeHandle();
+  EXPECT_NE(first_fd, second_fd);
+
+  EXPECT_EQ(::fcntl(first_fd, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+  EXPECT_NE(::fcntl(second_fd, F_GETFD), -1);
+}
+
 TEST(UdpTransportTest, ClosesSocketOnDestructionAndIsMoveOnly) {
   const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
 

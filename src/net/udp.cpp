@@ -52,6 +52,7 @@ bool UdpTransport::bind(uint32_t addr_be, uint16_t port_be) {
     return false;
   }
 
+  if (fd_ >= 0) ::close(fd_);
   fd_ = fd;
   local_.addr_be = bound.sin_addr.s_addr;
   local_.port_be = bound.sin_port;
