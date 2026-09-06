@@ -54,8 +54,8 @@ class SimulatedTransport {
         continue;
       }
 
-      const uint64_t delivery_tick = tick_ + latency_ticks_;
-      (void)r_jitter;
+      const uint64_t delivery_tick =
+          tick_ + latency_ticks_ + (r_jitter % (jitter_ticks_ + 1u));
 
       bool inserted = false;
       for (Entry& e : delay_buf_) {

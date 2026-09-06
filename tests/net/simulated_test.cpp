@@ -183,5 +183,52 @@ TEST(SimulatedTransportTest, LossIsProbabilisticAndReproducibleForIdenticalSeeds
   EXPECT_NE(partial, other_seed);
 }
 
+std::vector<uint32_t> runJitterTrial(uint64_t seed) {
+  LoopbackTransport a(kEndpointA);
+  LoopbackTransport b(kEndpointB);
+  a.connect(b);
+  SimulatedTransport<LoopbackTransport> sim_b(
+      b, SimConfig{.latency_ms = 100, .jitter_ms = 100, .loss_permille = 0, .seed = seed});
+
+  std::vector<uint32_t> delivered;
+  for (uint32_t t = 0; t < 80; ++t) {
+    if (t < 50) {
+      std::array<std::byte, 4> payload{};
+      std::memcpy(payload.data(), &t, sizeof(t));
+      EXPECT_TRUE(a.send(b.self(), payload));
+    }
+    PacketSlot slot;
+    while (sim_b.tryReceive(slot)) {
+      uint32_t v = 0;
+      std::memcpy(&v, slot.data.data(), sizeof(v));
+      delivered.push_back(v);
+    }
+    sim_b.advanceTick();
+  }
+  return delivered;
+}
+
+TEST(SimulatedTransportTest, JitterReordersDeliveryReproducibly) {
+  ASSERT_EQ(msToTicks(100), 6u);
+
+  const auto delivered = runJitterTrial(42);
+  EXPECT_EQ(delivered.size(), 50u);
+
+  bool has_inversion = false;
+  for (size_t i = 1; i < delivered.size(); ++i) {
+    if (delivered[i - 1] > delivered[i]) {
+      has_inversion = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(has_inversion);
+
+  const auto delivered_again = runJitterTrial(42);
+  EXPECT_EQ(delivered, delivered_again);
+
+  const auto delivered_other_seed = runJitterTrial(43);
+  EXPECT_NE(delivered, delivered_other_seed);
+}
+
 }  // namespace
 }  // namespace net
