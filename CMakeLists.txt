@@ -23,7 +23,7 @@ add_library(libsim STATIC src/sim/sim.cpp)
 target_include_directories(libsim PUBLIC src)
 target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 
-add_library(libnet STATIC src/net/bytes.cpp)
+add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp)
 target_link_libraries(libnet PUBLIC libsim)
 
 enable_testing()
@@ -39,6 +39,7 @@ target_link_libraries(smoke_test PRIVATE libsim GTest::gtest_main)
 add_test(NAME smoke_test COMMAND smoke_test)
 
 tw_add_test(bytes_test tests/net/bytes_test.cpp)
+tw_add_test(protocol_test tests/net/protocol_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
