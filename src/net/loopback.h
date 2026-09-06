@@ -25,6 +25,7 @@ class LoopbackTransport {
 
   bool send(const Endpoint& to, std::span<const std::byte> payload);
   bool tryReceive(PacketSlot& slot);
+  size_t inboxSize() const noexcept;
 
  private:
   Endpoint self_;

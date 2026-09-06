@@ -73,5 +73,28 @@ TEST(LoopbackTransportTest, InboxDeliversInFifoOrder) {
   EXPECT_EQ(receiveByte(), std::byte{0x33});
 }
 
+TEST(LoopbackTransportTest, FullInboxDropsNewPacketWithoutDisturbingQueued) {
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+
+  for (size_t i = 0; i < kLoopbackCapacity; ++i) {
+    const std::array<std::byte, 1> payload{static_cast<std::byte>(i & 0xFF)};
+    EXPECT_TRUE(a->send(b->self(), payload)) << "send " << i;
+  }
+  EXPECT_EQ(b->inboxSize(), kLoopbackCapacity);
+
+  const std::array<std::byte, 1> overflow_payload{std::byte{0xFF}};
+  EXPECT_FALSE(a->send(b->self(), overflow_payload));
+
+  for (size_t i = 0; i < kLoopbackCapacity; ++i) {
+    PacketSlot slot;
+    ASSERT_TRUE(b->tryReceive(slot)) << "receive " << i;
+    EXPECT_EQ(slot.data[0], static_cast<std::byte>(i & 0xFF)) << "receive " << i;
+  }
+  PacketSlot slot;
+  EXPECT_FALSE(b->tryReceive(slot));
+}
+
 }  // namespace
 }  // namespace net

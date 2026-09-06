@@ -17,6 +17,7 @@ bool LoopbackTransport::send(const Endpoint& to, std::span<const std::byte> payl
   (void)to;
   if (peer_ == nullptr) return false;
   if (payload.size() > kMaxPacket) return false;
+  if (peer_->write_ - peer_->read_ == kLoopbackCapacity) return false;
 
   PacketSlot& dest = peer_->inbox_[peer_->write_ & (kLoopbackCapacity - 1)];
   std::memcpy(dest.data.data(), payload.data(), payload.size());
@@ -31,6 +32,10 @@ bool LoopbackTransport::tryReceive(PacketSlot& slot) {
   slot = inbox_[read_ & (kLoopbackCapacity - 1)];
   ++read_;
   return true;
+}
+
+size_t LoopbackTransport::inboxSize() const noexcept {
+  return static_cast<size_t>(write_ - read_);
 }
 
 }  // namespace net
