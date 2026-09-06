@@ -411,5 +411,51 @@ TEST(WorldSnapshotCodecTest, RejectsPayloadThatOutrunsItsCount) {
   EXPECT_TRUE(decodeSnapshot(r, out));
 }
 
+TEST(InputCommandCodecTest, RejectsNonFiniteFloats) {
+  auto withMoveXBytes = [](std::array<std::byte, 4> bits) {
+    std::array<std::byte, kInputBytes> bytes = {
+        std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+        bits[0],         bits[1],         bits[2],         bits[3],
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+        std::byte{0x01}};
+    return bytes;
+  };
+
+  // Quiet NaN: 00 00 C0 7F (little-endian bytes of 0x7FC00000).
+  const auto nan_bytes =
+      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0xC0}, std::byte{0x7F}});
+  // +Infinity: 00 00 80 7F (little-endian bytes of 0x7F800000).
+  const auto inf_bytes =
+      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x7F}});
+
+  for (const auto& bytes : {nan_bytes, inf_bytes}) {
+    ByteReader r(bytes);
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out));
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu);
+  }
+}
+
+TEST(WorldSnapshotCodecTest, RejectsNonFinitePlayerFloats) {
+  std::array<std::byte, kSnapshotFixedBytes + kPlayerStateBytes> bytes = {
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      // x = +Infinity: 00 00 80 7F
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x7F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xBF},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F}};
+
+  ByteReader r(bytes);
+  sim::WorldSnapshot out{};
+  out.tick = 0xAAAAAAAAu;
+  EXPECT_FALSE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+}
+
 }  // namespace
 }  // namespace net

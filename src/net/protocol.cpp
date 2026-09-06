@@ -1,5 +1,7 @@
 #include "net/protocol.h"
 
+#include <cmath>
+
 namespace net {
 
 bool encodeHeader(const PacketHeader& h, ByteWriter& w) {
@@ -59,6 +61,7 @@ bool decodeInput(ByteReader& r, sim::InputCommand& out) {
   in.fire = r.u8() != 0;
 
   if (!r.ok()) return false;
+  if (!std::isfinite(in.move_x) || !std::isfinite(in.move_y)) return false;
 
   out = in;
   return true;
@@ -101,6 +104,13 @@ bool decodeSnapshot(ByteReader& r, sim::WorldSnapshot& out) {
   }
 
   if (!r.ok()) return false;
+  for (uint32_t i = 0; i < s.count; ++i) {
+    const sim::PlayerState& p = s.players[i];
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.vx) ||
+        !std::isfinite(p.vy) || !std::isfinite(p.radius)) {
+      return false;
+    }
+  }
 
   out = s;
   return true;
