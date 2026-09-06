@@ -43,14 +43,16 @@ size_t ByteWriter::size() const noexcept { return cursor_; }
 ByteReader::ByteReader(std::span<const std::byte> buf) noexcept : buf_(buf) {}
 
 uint8_t ByteReader::u8() noexcept {
-  if (cursor_ + 1 > buf_.size()) return 0;
+  if (!ok_) return 0;
+  if (cursor_ + 1 > buf_.size()) { ok_ = false; return 0; }
   const uint8_t v = std::to_integer<uint8_t>(buf_[cursor_]);
   cursor_ += 1;
   return v;
 }
 
 uint16_t ByteReader::u16() noexcept {
-  if (cursor_ + 2 > buf_.size()) return 0;
+  if (!ok_) return 0;
+  if (cursor_ + 2 > buf_.size()) { ok_ = false; return 0; }
   const uint16_t v =
       static_cast<uint16_t>(std::to_integer<uint8_t>(buf_[cursor_ + 0])) |
       static_cast<uint16_t>(static_cast<uint16_t>(std::to_integer<uint8_t>(buf_[cursor_ + 1])) << 8);
@@ -59,7 +61,8 @@ uint16_t ByteReader::u16() noexcept {
 }
 
 uint32_t ByteReader::u32() noexcept {
-  if (cursor_ + 4 > buf_.size()) return 0;
+  if (!ok_) return 0;
+  if (cursor_ + 4 > buf_.size()) { ok_ = false; return 0; }
   const uint32_t v =
       static_cast<uint32_t>(std::to_integer<uint8_t>(buf_[cursor_ + 0])) |
       (static_cast<uint32_t>(std::to_integer<uint8_t>(buf_[cursor_ + 1])) << 8) |
@@ -76,7 +79,10 @@ float ByteReader::f32() noexcept {
   return v;
 }
 
-bool ByteReader::ok() const noexcept { return true; }
-size_t ByteReader::remaining() const noexcept { return buf_.size() - cursor_; }
+bool ByteReader::ok() const noexcept { return ok_; }
+size_t ByteReader::remaining() const noexcept {
+  if (!ok_) return 0;
+  return buf_.size() - cursor_;
+}
 
 }  // namespace net

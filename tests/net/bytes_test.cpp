@@ -93,5 +93,23 @@ TEST(ByteReaderTest, RoundTripsByteWriterOutput) {
   EXPECT_TRUE(r.ok());
 }
 
+TEST(ByteReaderTest, OverreadIsStickyAndHidesTheRest) {
+  const std::array<std::byte, 5> buf{std::byte{0x01}, std::byte{0x02},
+                                      std::byte{0x03}, std::byte{0x04},
+                                      std::byte{0x05}};
+  ByteReader r(buf);
+
+  EXPECT_EQ(r.u32(), 0x04030201u);
+  EXPECT_TRUE(r.ok());
+  EXPECT_EQ(r.remaining(), 1u);
+
+  EXPECT_EQ(r.u32(), 0u);
+  EXPECT_FALSE(r.ok());
+  EXPECT_EQ(r.remaining(), 0u);
+
+  EXPECT_EQ(r.u8(), 0u);
+  EXPECT_FALSE(r.ok());
+}
+
 }  // namespace
 }  // namespace net

@@ -44,6 +44,7 @@ class ByteReader {
  private:
   std::span<const std::byte> buf_;
   size_t cursor_ = 0;
+  bool ok_ = true;
 };
 
 }  // namespace net
