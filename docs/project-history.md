@@ -109,4 +109,158 @@ before assuming a repo-level problem.
 
 ---
 
-<!-- Next section: ## P1 — Wire protocol, serialization, transport -->
+## P1 — Wire protocol, serialization, transport
+
+**Decision — explicit little-endian encoding, byte by byte.** Every protocol
+field is written/read through `net::ByteWriter`/`net::ByteReader`, never via
+`memcpy` of a struct onto the wire or `reinterpret_cast` of a buffer to a
+struct. Both alternatives make padding and host endianness part of the wire
+format, and the cast is unaligned-access UB. LE was chosen because every
+build target is LE, so the encode compiles to a no-op move. `_be`-suffixed
+fields (`Endpoint::addr_be`/`port_be`) are reserved for values the *kernel*
+requires in network order — the naming is the guard against silently mixing
+the two orderings. See `docs/wire-format.md`.
+
+**Decision — `ByteReader`/`ByteWriter` are the only place a byte offset is
+computed.** Every codec above them (`encodeHeader`, `decodeInput`,
+`decodeSnapshot`, ...) is bounds-safe by construction because it never does
+its own offset arithmetic — it only calls `u8()`/`u16()`/`u32()`/`f32()` and
+checks `ok()`. A failed read/write is sticky (once `ok()` is false, it never
+resets) and, for reads, `remaining()` reports `0` — this is what lets a
+codec check `ok()` once after a sequence of reads instead of after each one.
+
+**Decision — strict framing: `payload_len` must equal the bytes actually
+present, exactly.** Established in the header codec and reused by every
+payload codec (`InputCommand` requires `remaining() == 17` on entry;
+`WorldSnapshot` requires `remaining() == count * 24` after reading `count`).
+Trailing bytes beyond the declared length are a rejection, not something a
+downstream decoder has to defend against. The one documented exception is
+`InputCommand::fire`, decoded as `u8 != 0` rather than requiring exactly `0`
+or `1` — a `bool` has no invalid bit pattern to exploit, so strictness there
+buys nothing.
+
+**Decision — `WorldSnapshot::count` out of range is rejected, never
+clamped.** A clamp is memory-safe at the clamp site but leaves `out.count`
+describing more players than were filled — the same out-of-bounds read one
+level up, in the caller. Caught in plan review before any code existed.
+
+**Decision — `SimulatedTransport` delays on receive, not send.** `send()` is
+a pure pass-through to the inner transport; each endpoint delays its own
+*inbound* traffic. Consequence: a test with a `SimulatedTransport` wrapping
+both ends of a link produces a round-trip delay equal to the **sum** of the
+two configured latencies — which is what a UI slider labelled "RTT" means.
+
+**Decision — `loss_permille` is an integer (0..1000), never a float.** Also,
+no `std::uniform_int_distribution`/`uniform_real_distribution` anywhere in
+`SimulatedTransport` — only raw `std::mt19937_64` output plus modulo.
+Distribution objects are not specified to produce the same sequence across
+standard library implementations, which would silently break the
+reproducibility the class exists to guarantee. `msToTicks()` similarly stays
+integer-only so the delivery schedule never depends on float rounding.
+
+**Decision — `LoopbackTransport` is point-to-point, not a multi-peer
+switch.** A multi-peer switch is what P2's authoritative server will want;
+P1 needs exactly two parties to test netcode and to give `SimulatedTransport`
+an inner transport. `connect()` is the extension point — YAGNI applied
+deliberately, not an oversight.
+
+**Deferred — `recvmmsg`/`sendmmsg` batching → P5.** They are batch calls, and
+`Transport::tryReceive(PacketSlot&)` hands back one packet at a time by
+design. Batching belongs with P5's receiver thread, where it is measurable
+against a benchmark rather than guessed at.
+
+**Deferred — join/leave reliability *logic* → P2; the `seq`/`ack_seq` header
+fields are reserved now.** The reliability channel needs a session concept,
+which arrives with P2's authoritative server. Carrying the fields at P1 means
+P2 only adds retransmit logic, never reopens the header layout. Same
+treatment for `tick`/`send_time_ms`/`ack_tick`, reserved for P3's clock sync
+and RTT/drift estimation.
+
+**Finding — the container's loopback interface works.** Task 5's `UdpTransport`
+checkpoint (binding two sockets to `127.0.0.1` inside `tickwire-dev` and
+exchanging a datagram) passed on the first run. The risk the P1 plan flagged
+— an unverified container networking constraint that would also constrain
+P2's demo — did not materialize.
+
+**Finding — a stale test assertion, caught by the checkpoint after it.** Task
+2 Checkpoint 2's test asserted that a bare 24-byte header (no payload bytes
+following, `payload_len = 4` declared) decodes successfully. Checkpoint 3
+then added the invariant that `payload_len` must equal the bytes actually
+present — which correctly *rejects* that exact bare-header case, since zero
+payload bytes follow a header claiming four. The two assertions couldn't
+both hold; Checkpoint 3's invariant is the real one (it's the length-
+confusion guard this task exists to build), so Checkpoint 2's assertion was
+swapped for a well-formed header-plus-payload packet. Caught by ASan
+(stack-use-after-scope in the *test*, from a `ByteReader` spanning a
+temporary `std::array` returned by value) while fixing it, not by review.
+
+**Finding — the 20,000-trial fuzz corpus's mandated seed produced zero
+useful hits.** `robustness_test.cpp`'s random-byte sweep needs at least one
+trial where header decode succeeds *and* a payload decode succeeds, to prove
+the corpus isn't degenerating to pure magic-byte rejections. With the
+plan-specified seed `0xC0FFEE`, the only realistic path to a successful
+payload decode (an `InputCommand`-shaped trial: random total length happens
+to equal 41, random type happens to be `kInput`) has expected value under 1
+per run, and this seed landed on zero. Substituted seed `2`, which reliably
+produces hits, following the same escape hatch the plan itself specifies for
+Task 6 Checkpoint 4's jitter-inversion assertion (a fixed seed is for
+reproducibility, not sacred).
+
+### Task 7 security review — findings
+
+Threat model: an unauthenticated attacker controls every byte of every
+datagram and can send them at any rate, no handshake required. Reviewed
+manually plus via the `cpp-reviewer` and `security-reviewer` agents.
+
+**Fixed — `UdpTransport::bind()` leaked the previous socket on rebind.**
+`bind()` unconditionally opened a new socket and overwrote `fd_` on success
+with no check for an already-bound instance. Not attacker-triggerable
+directly (requires the *caller* to call `bind()` twice), but a real resource
+leak. Fixed by closing the old fd only after the new one is fully validated,
+so a failed rebind attempt leaves the original working binding untouched.
+
+**Fixed — `LoopbackTransport` was copyable/movable despite holding a raw
+back-pointer.** `connect()` sets both sides' `peer_` to point at each other;
+the compiler-generated copy/move would leave one side's `peer_` dangling
+(after the original is destroyed) or stale. Not attacker-facing
+(`LoopbackTransport` never touches real network traffic), but a genuine
+footgun for anyone who later moves one into a container. Fixed by deleting
+all four copy/move operations — nothing currently needs them.
+
+**Fixed — non-finite floats (`NaN`/`Infinity`) were accepted by
+`decodeInput`/`decodeSnapshot`.** An attacker could send a well-formed
+packet with a `NaN` `move_x`, and `decodeInput` would hand it straight
+through as valid data. `NaN` is sticky under IEEE-754; once P2/P3 wire
+decoded payloads into `libsim`, this would permanently corrupt an entity's
+simulation state every tick with no recovery short of reset. Fixed by
+rejecting non-finite floats in both codecs, before assigning the caller's
+output struct — consistent with "decoders reject rather than normalize."
+
+**Fixed — several tests stack-allocated `LoopbackTransport`
+(~310 KB)/`SimulatedTransport` (~157 KB) instead of using
+`std::make_unique`.** This is an explicit Global Constraint in the P1 plan
+specifically to avoid stack frame pressure under ASan. Self-caught while
+reviewing the test files; converted throughout `simulated_test.cpp`.
+
+**Deferred to P5 — `UdpTransport::tryReceive()`'s oversized-datagram retry
+loop is not bounded per call.** On `MSG_TRUNC` detecting a datagram larger
+than `kMaxPacket`, the loop discards it and retries `recvfrom` immediately,
+within the same call. An attacker flooding oversized datagrams could make a
+single `tryReceive()` call do more work than the "one call returns one
+packet" contract implies — bounded by the kernel's socket receive buffer
+(not unbounded), but a real deviation worth capping. Not fixed now because
+P5 already owns the receiver-thread and `recvmmsg`-batching design where a
+per-call drain cap belongs and can be benchmarked rather than guessed at.
+
+**Deferred to P2 — no binding between a decoded `InputCommand::player_id`
+and the UDP source `Endpoint` it arrived from.** Raw, handshake-less UDP
+means any attacker who can reach the port can forge an `InputCommand`
+claiming to be any `player_id`, including another live player's. No P1 code
+path wires a decoded `InputCommand` into any authoritative state — `World`
+and all simulation behavior are P2's job — so nothing is exploitable today.
+Recorded so P2's join/leave + session (`seq`/`ack_seq`) design treats
+endpoint-to-player binding as a requirement, not an afterthought.
+
+---
+
+<!-- Next section: ## P2 — Authoritative server, World, and libsim behavior -->
