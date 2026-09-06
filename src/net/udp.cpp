@@ -60,12 +60,13 @@ bool UdpTransport::tryReceive(PacketSlot& slot) {
   for (;;) {
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
-    const ssize_t n = ::recvfrom(fd_, slot.data.data(), kMaxPacket, 0,
+    const ssize_t n = ::recvfrom(fd_, slot.data.data(), kMaxPacket, MSG_TRUNC,
                                   reinterpret_cast<sockaddr*>(&from), &from_len);
     if (n < 0) {
       if (errno == EINTR) continue;
       return false;
     }
+    if (static_cast<size_t>(n) > kMaxPacket) continue;  // truncated: discard and drain onward
 
     slot.len = static_cast<uint16_t>(n);
     slot.peer.addr_be = from.sin_addr.s_addr;
