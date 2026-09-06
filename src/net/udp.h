@@ -11,12 +11,19 @@ namespace net {
 class UdpTransport {
  public:
   UdpTransport() noexcept = default;
+  ~UdpTransport();
+
+  UdpTransport(const UdpTransport&) = delete;
+  UdpTransport& operator=(const UdpTransport&) = delete;
+  UdpTransport(UdpTransport&& other) noexcept;
+  UdpTransport& operator=(UdpTransport&& other) noexcept;
 
   // Binds a non-blocking IPv4 UDP socket. port_be == 0 requests an ephemeral
   // port. On failure returns false and the object stays unbound.
   bool bind(uint32_t addr_be, uint16_t port_be);
 
   Endpoint localEndpoint() const noexcept;  // meaningful only after bind() succeeded
+  int nativeHandle() const noexcept;        // -1 when unbound
 
   bool send(const Endpoint& to, std::span<const std::byte> payload);
   bool tryReceive(PacketSlot& slot);

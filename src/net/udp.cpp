@@ -11,6 +11,26 @@
 
 namespace net {
 
+UdpTransport::~UdpTransport() {
+  if (fd_ >= 0) ::close(fd_);
+}
+
+UdpTransport::UdpTransport(UdpTransport&& other) noexcept
+    : fd_(other.fd_), local_(other.local_) {
+  other.fd_ = -1;
+}
+
+UdpTransport& UdpTransport::operator=(UdpTransport&& other) noexcept {
+  if (this == &other) return *this;
+  if (fd_ >= 0) ::close(fd_);
+  fd_ = other.fd_;
+  local_ = other.local_;
+  other.fd_ = -1;
+  return *this;
+}
+
+int UdpTransport::nativeHandle() const noexcept { return fd_; }
+
 bool UdpTransport::bind(uint32_t addr_be, uint16_t port_be) {
   const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
   if (fd < 0) return false;

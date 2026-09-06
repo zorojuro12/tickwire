@@ -1,12 +1,16 @@
 #include "net/udp.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <cstring>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -114,6 +118,50 @@ TEST(UdpTransportTest, SendRejectsPayloadsOverKMaxPacket) {
   ASSERT_TRUE(pollReceive(b, slot));
   EXPECT_EQ(slot.len, kMaxPacket);
   EXPECT_FALSE(pollReceive(b, slot, 100));
+}
+
+TEST(UdpTransportTest, ClosesSocketOnDestructionAndIsMoveOnly) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+
+  int fd_from_scope = -1;
+  {
+    UdpTransport t;
+    ASSERT_TRUE(t.bind(loopback_be, 0));
+    fd_from_scope = t.nativeHandle();
+  }
+  EXPECT_EQ(::fcntl(fd_from_scope, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+
+  int y_fd = -1;
+  std::optional<UdpTransport> y;
+  {
+    UdpTransport x;
+    ASSERT_TRUE(x.bind(loopback_be, 0));
+    const int original_fd = x.nativeHandle();
+
+    y.emplace(std::move(x));
+    y_fd = y->nativeHandle();
+    EXPECT_EQ(y_fd, original_fd);
+    EXPECT_EQ(x.nativeHandle(), -1);
+
+    // x (moved-from) goes out of scope here; it must not close original_fd,
+    // which y now owns.
+  }
+  EXPECT_NE(::fcntl(y_fd, F_GETFD), -1);
+
+  const std::array<std::byte, 3> payload{std::byte{1}, std::byte{2}, std::byte{3}};
+  UdpTransport receiver;
+  ASSERT_TRUE(receiver.bind(loopback_be, 0));
+  EXPECT_TRUE(y->send(receiver.localEndpoint(), payload));
+  PacketSlot slot;
+  EXPECT_TRUE(pollReceive(receiver, slot));
+
+  y.reset();
+  EXPECT_EQ(::fcntl(y_fd, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+
+  static_assert(!std::is_copy_constructible_v<UdpTransport>);
+  static_assert(!std::is_copy_assignable_v<UdpTransport>);
 }
 
 }  // namespace
