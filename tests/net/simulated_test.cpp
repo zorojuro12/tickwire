@@ -47,5 +47,56 @@ TEST(SimulatedTransportTest, TransparentWhenEverythingIsZeroed) {
   EXPECT_EQ(msToTicks(200), 12u);
 }
 
+TEST(SimulatedTransportTest, LatencyDelaysDeliveryByExactTicks) {
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+
+  SimulatedTransport<LoopbackTransport> sim_b(
+      *b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 1});
+  ASSERT_EQ(msToTicks(200), 12u);
+
+  const std::array<std::byte, 1> payload{std::byte{0xAB}};
+  ASSERT_TRUE(a->send(b->self(), payload));
+
+  for (uint64_t t = 0; t < 20; ++t) {
+    PacketSlot slot;
+    const bool received = sim_b.tryReceive(slot);
+    if (t == 12) {
+      EXPECT_TRUE(received) << "tick " << t;
+      EXPECT_EQ(slot.data[0], std::byte{0xAB});
+    } else {
+      EXPECT_FALSE(received) << "tick " << t;
+    }
+    sim_b.advanceTick();
+  }
+
+}
+
+TEST(SimulatedTransportTest, LatencyIsMeasuredFromArrivalNotConstruction) {
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+
+  SimulatedTransport<LoopbackTransport> sim_b(
+      *b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 1});
+
+  for (uint64_t t = 0; t < 5; ++t) sim_b.advanceTick();
+  ASSERT_EQ(sim_b.tick(), 5u);
+
+  const std::array<std::byte, 1> payload{std::byte{0xCD}};
+  ASSERT_TRUE(a->send(b->self(), payload));
+
+  for (uint64_t t = sim_b.tick(); t < 17; ++t) {
+    PacketSlot slot;
+    EXPECT_FALSE(sim_b.tryReceive(slot)) << "tick " << t;
+    sim_b.advanceTick();
+  }
+  ASSERT_EQ(sim_b.tick(), 17u);
+  PacketSlot slot;
+  ASSERT_TRUE(sim_b.tryReceive(slot));
+  EXPECT_EQ(slot.data[0], std::byte{0xCD});
+}
+
 }  // namespace
 }  // namespace net
