@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <span>
 
 #include "net/transport.h"
@@ -7,6 +9,8 @@
 namespace net {
 
 inline constexpr size_t kLoopbackCapacity = 256;
+static_assert((kLoopbackCapacity & (kLoopbackCapacity - 1)) == 0,
+              "kLoopbackCapacity must be a power of two");
 
 // In-memory, point-to-point, deterministic Transport. A multi-peer switch is
 // what P2's authoritative server will want; P1 needs exactly two parties to
@@ -25,8 +29,9 @@ class LoopbackTransport {
  private:
   Endpoint self_;
   LoopbackTransport* peer_ = nullptr;
-  PacketSlot inbox_slot_{};
-  bool has_packet_ = false;
+  std::array<PacketSlot, kLoopbackCapacity> inbox_{};
+  uint64_t write_ = 0;
+  uint64_t read_ = 0;
 };
 static_assert(Transport<LoopbackTransport>);
 

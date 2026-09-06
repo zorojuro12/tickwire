@@ -38,5 +38,40 @@ TEST(LoopbackTransportTest, DeliversPacketIntactWithSenderEndpoint) {
   EXPECT_EQ(slot_a.peer, b->self());
 }
 
+TEST(LoopbackTransportTest, InboxDeliversInFifoOrder) {
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+
+  auto sendByte = [&](std::byte v) {
+    const std::array<std::byte, 1> payload{v};
+    ASSERT_TRUE(a->send(b->self(), payload));
+  };
+  auto receiveByte = [&]() -> std::byte {
+    PacketSlot slot;
+    EXPECT_TRUE(b->tryReceive(slot));
+    return slot.data[0];
+  };
+
+  sendByte(std::byte{0xAA});
+  sendByte(std::byte{0xBB});
+  sendByte(std::byte{0xCC});
+
+  EXPECT_EQ(receiveByte(), std::byte{0xAA});
+  EXPECT_EQ(receiveByte(), std::byte{0xBB});
+  EXPECT_EQ(receiveByte(), std::byte{0xCC});
+
+  PacketSlot slot;
+  EXPECT_FALSE(b->tryReceive(slot));
+
+  sendByte(std::byte{0x11});
+  sendByte(std::byte{0x22});
+  sendByte(std::byte{0x33});
+
+  EXPECT_EQ(receiveByte(), std::byte{0x11});
+  EXPECT_EQ(receiveByte(), std::byte{0x22});
+  EXPECT_EQ(receiveByte(), std::byte{0x33});
+}
+
 }  // namespace
 }  // namespace net
