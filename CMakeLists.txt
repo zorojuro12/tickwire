@@ -43,6 +43,7 @@ tw_add_test(protocol_test tests/net/protocol_test.cpp)
 tw_add_test(loopback_test tests/net/loopback_test.cpp)
 tw_add_test(udp_test tests/net/udp_test.cpp)
 tw_add_test(simulated_test tests/net/simulated_test.cpp)
+tw_add_test(robustness_test tests/net/robustness_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
