@@ -11,6 +11,17 @@ local demo — not just a running server. See the design doc (linked below) for
 the full phase table and rationale; see `docs/project-history.md` for what's
 changed or been discovered since.
 
+## File Structure
+
+| Path | Contents |
+|---|---|
+| `src/sim/` | `libsim` — deterministic simulation core and POD payload types. No I/O, no wall-clock reads, no allocation. |
+| `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, and the `Transport` implementations (UDP, loopback, simulated). |
+| `scripts/` | `tw` (container invocation), `ci.sh`, toolchain/determinism verification scripts. |
+| `tests/` | GoogleTest suites, mirroring `src/` by subdirectory (`tests/net/`, ...). |
+| `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness). |
+| `docs/` | Specs, phase plans, project history, and frozen format references (e.g. `wire-format.md`). |
+
 ## Verified constraints
 
 Every rule below was hit as a real failure during toolchain verification or
@@ -62,6 +73,17 @@ by hand.
 ## Language
 
 - **No `std::format`** — GCC 10 lacks it. Use fmtlib if formatting is needed.
+
+## Wire protocol (P1)
+
+- **Protocol fields are explicitly little-endian**, encoded/decoded byte by
+  byte through `net::ByteWriter`/`net::ByteReader` — never `memcpy` a struct
+  onto the wire, never `reinterpret_cast` a buffer to a struct. `_be`
+  suffixes (`Endpoint::addr_be`, `Endpoint::port_be`) are reserved for values
+  the *kernel* requires in network order; everything else is little-endian.
+  See [`docs/wire-format.md`](docs/wire-format.md).
+- **No `std::bit_cast`** — GCC 10's libstdc++ ships it only from GCC 11. Pun
+  `float`↔`uint32_t` with `std::memcpy`, which is well-defined regardless.
 
 ## `libsim` boundary
 
@@ -123,5 +145,6 @@ Full detail lives in [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md)
 
 - [`docs/specs/2026-09-04-tickwire-design.md`](docs/specs/2026-09-04-tickwire-design.md) — the design
 - [`docs/specs/2026-09-04-architecture-resolution.md`](docs/specs/2026-09-04-architecture-resolution.md) — authoritative for every architectural decision
+- [`docs/wire-format.md`](docs/wire-format.md) — the frozen P1 wire format
 - [`docs/project-history.md`](docs/project-history.md) — cross-phase decisions, pivots, and findings
 - [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md) — full tool/skill/agent reference by situation

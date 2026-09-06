@@ -1,0 +1,461 @@
+#include "net/protocol.h"
+
+#include <array>
+#include <cstring>
+
+#include <gtest/gtest.h>
+
+namespace net {
+namespace {
+
+constexpr std::array<std::byte, kHeaderBytes> kGoldenHeaderBytes = {
+    std::byte{0x54}, std::byte{0x57}, std::byte{0x49}, std::byte{0x52},
+    std::byte{0x01}, std::byte{0x01}, std::byte{0x04}, std::byte{0x00},
+    std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+    std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
+    std::byte{0xB0}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+    std::byte{0x07}, std::byte{0x00}, std::byte{0x09}, std::byte{0x00}};
+
+PacketHeader goldenHeader() {
+  PacketHeader h;
+  h.magic = kProtocolMagic;
+  h.version = 1;
+  h.type = MsgType::kInput;
+  h.payload_len = 4;
+  h.tick = 1234;
+  h.send_time_ms = 123456;
+  h.ack_tick = 1200;
+  h.seq = 7;
+  h.ack_seq = 9;
+  return h;
+}
+
+TEST(ProtocolHeaderTest, EncodesToExactBytesAndDecodesBack) {
+  std::array<std::byte, 28> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeHeader(goldenHeader(), w));
+  EXPECT_EQ(w.size(), kHeaderBytes);
+  for (size_t i = 0; i < kHeaderBytes; ++i) {
+    EXPECT_EQ(buf[i], kGoldenHeaderBytes[i]) << "byte " << i;
+  }
+
+  buf[24] = std::byte{0xAA};
+  buf[25] = std::byte{0xBB};
+  buf[26] = std::byte{0xCC};
+  buf[27] = std::byte{0xDD};
+
+  ByteReader r(buf);
+  PacketHeader out;
+  ASSERT_TRUE(decodeHeader(r, out));
+  const PacketHeader expected = goldenHeader();
+  EXPECT_EQ(out.magic, expected.magic);
+  EXPECT_EQ(out.version, expected.version);
+  EXPECT_EQ(out.type, expected.type);
+  EXPECT_EQ(out.payload_len, expected.payload_len);
+  EXPECT_EQ(out.tick, expected.tick);
+  EXPECT_EQ(out.send_time_ms, expected.send_time_ms);
+  EXPECT_EQ(out.ack_tick, expected.ack_tick);
+  EXPECT_EQ(out.seq, expected.seq);
+  EXPECT_EQ(out.ack_seq, expected.ack_seq);
+  EXPECT_EQ(r.remaining(), 4u);
+}
+
+TEST(ProtocolHeaderTest, ShortBufferIsRejectedAndLeavesOutputUntouched) {
+  for (size_t prefix = 0; prefix < kHeaderBytes; ++prefix) {
+    ByteReader r(std::span<const std::byte>(kGoldenHeaderBytes).subspan(0, prefix));
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out)) << "prefix " << prefix;
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+}
+
+TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
+  auto mutated = [](size_t byte_index, uint8_t value) {
+    std::array<std::byte, kHeaderBytes> bytes = kGoldenHeaderBytes;
+    bytes[byte_index] = std::byte{value};
+    return bytes;
+  };
+
+  const std::array<std::array<std::byte, kHeaderBytes>, 5> cases = {
+      mutated(0, 0x55),  // wrong magic
+      mutated(4, 0x02),  // wrong version
+      mutated(5, 0x00),  // MsgType::kInvalid
+      mutated(5, 0x06),  // one past kMaxMsgType
+      mutated(5, 0xFF),
+  };
+
+  for (size_t i = 0; i < cases.size(); ++i) {
+    ByteReader r(cases[i]);
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out)) << "case " << i;
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu) << "case " << i;
+  }
+
+  // A bare 24-byte header claiming payload_len == 4 has no payload
+  // following it, so it is itself a length-confusion case rejected by
+  // Checkpoint 3 below; a well-formed packet needs the payload bytes too.
+  std::array<std::byte, 28> golden28{};
+  for (size_t i = 0; i < kHeaderBytes; ++i) golden28[i] = kGoldenHeaderBytes[i];
+  golden28[24] = std::byte{0xAA};
+  golden28[25] = std::byte{0xBB};
+  golden28[26] = std::byte{0xCC};
+  golden28[27] = std::byte{0xDD};
+  ByteReader r(golden28);
+  PacketHeader out;
+  EXPECT_TRUE(decodeHeader(r, out));
+}
+
+TEST(ProtocolHeaderTest, RejectsPayloadLenThatDisagreesWithThePacket) {
+  std::array<std::byte, 28> golden28{};
+  for (size_t i = 0; i < kHeaderBytes; ++i) golden28[i] = kGoldenHeaderBytes[i];
+  golden28[24] = std::byte{0xAA};
+  golden28[25] = std::byte{0xBB};
+  golden28[26] = std::byte{0xCC};
+  golden28[27] = std::byte{0xDD};
+
+  auto withPayloadLen = [&](uint16_t len) {
+    std::array<std::byte, 28> bytes = golden28;
+    bytes[6] = std::byte(len & 0xFFu);
+    bytes[7] = std::byte((len >> 8) & 0xFFu);
+    return bytes;
+  };
+
+  {
+    const std::array<std::byte, 28> bytes = withPayloadLen(3);
+    ByteReader r(bytes);
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const std::array<std::byte, 28> bytes = withPayloadLen(5);
+    ByteReader r(bytes);
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    ByteReader r(std::span<const std::byte>(golden28).subspan(0, kHeaderBytes));
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const std::array<std::byte, 28> bytes = withPayloadLen(0xFFFF);
+    ByteReader r(bytes);
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+
+  ByteReader r(golden28);
+  PacketHeader out;
+  EXPECT_TRUE(decodeHeader(r, out));
+}
+
+TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
+  const sim::InputCommand in{
+      .player_id = 3, .tick = 1234, .move_x = 1.0f, .move_y = -0.5f, .fire = true};
+
+  std::array<std::byte, kInputBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeInput(in, w));
+  EXPECT_EQ(w.size(), kInputBytes);
+
+  const std::array<std::byte, kInputBytes> expected = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x01}};
+  EXPECT_EQ(buf, expected);
+
+  ByteReader r(buf);
+  sim::InputCommand out{};
+  ASSERT_TRUE(decodeInput(r, out));
+  EXPECT_EQ(out.player_id, in.player_id);
+  EXPECT_EQ(out.tick, in.tick);
+  uint32_t move_x_bits = 0, expected_move_x_bits = 0;
+  std::memcpy(&move_x_bits, &out.move_x, sizeof(move_x_bits));
+  std::memcpy(&expected_move_x_bits, &in.move_x, sizeof(expected_move_x_bits));
+  EXPECT_EQ(move_x_bits, expected_move_x_bits);
+  uint32_t move_y_bits = 0, expected_move_y_bits = 0;
+  std::memcpy(&move_y_bits, &out.move_y, sizeof(move_y_bits));
+  std::memcpy(&expected_move_y_bits, &in.move_y, sizeof(expected_move_y_bits));
+  EXPECT_EQ(move_y_bits, expected_move_y_bits);
+  EXPECT_EQ(out.fire, in.fire);
+}
+
+TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
+  std::array<std::byte, kInputBytes> buf = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x00}};
+
+  {
+    ByteReader r(buf);
+    sim::InputCommand out{};
+    ASSERT_TRUE(decodeInput(r, out));
+    EXPECT_FALSE(out.fire);
+  }
+
+  buf[16] = std::byte{0x7F};
+  {
+    ByteReader r(buf);
+    sim::InputCommand out{};
+    ASSERT_TRUE(decodeInput(r, out));
+    EXPECT_TRUE(out.fire);
+  }
+}
+
+TEST(InputCommandCodecTest, RejectsFramingMismatch) {
+  const std::array<std::byte, kInputBytes> golden = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x01}};
+
+  for (size_t prefix = 0; prefix < kInputBytes; ++prefix) {
+    ByteReader r(std::span<const std::byte>(golden).subspan(0, prefix));
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out)) << "prefix " << prefix;
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+
+  std::array<std::byte, kInputBytes + 1> overlong{};
+  for (size_t i = 0; i < kInputBytes; ++i) overlong[i] = golden[i];
+  overlong[kInputBytes] = std::byte{0xEE};
+  {
+    ByteReader r(overlong);
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out));
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu);
+  }
+}
+
+constexpr std::array<std::byte, kSnapshotFixedBytes + 2 * kPlayerStateBytes>
+    kGoldenTwoPlayerSnapshotBytes = {
+        std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+
+        std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xBF},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F},
+
+        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xC0},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0xC0}, std::byte{0x3F},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F}};
+
+sim::WorldSnapshot goldenTwoPlayerSnapshot() {
+  sim::WorldSnapshot s{};
+  s.tick = 1234;
+  s.count = 2;
+  s.players[0] = {.id = 1, .x = 2.0f, .y = 3.0f, .vx = 0.0f, .vy = -1.0f, .radius = 0.5f};
+  s.players[1] = {.id = 2, .x = -4.0f, .y = 0.0f, .vx = 1.5f, .vy = 0.0f, .radius = 0.5f};
+  s.players[2].id = 0xDEADBEEFu;
+  return s;
+}
+
+TEST(WorldSnapshotCodecTest, EncodesToExactBytesAndDecodesBack) {
+  const sim::WorldSnapshot s = goldenTwoPlayerSnapshot();
+
+  std::array<std::byte, 56> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshot(s, w));
+  EXPECT_EQ(w.size(), kSnapshotFixedBytes + 2 * kPlayerStateBytes);
+  for (size_t i = 0; i < kGoldenTwoPlayerSnapshotBytes.size(); ++i) {
+    EXPECT_EQ(buf[i], kGoldenTwoPlayerSnapshotBytes[i]) << "byte " << i;
+  }
+
+  ByteReader r(buf);
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, s.tick);
+  EXPECT_EQ(out.count, s.count);
+  for (uint32_t i = 0; i < s.count; ++i) {
+    EXPECT_EQ(out.players[i].id, s.players[i].id) << "player " << i;
+    EXPECT_EQ(out.players[i].x, s.players[i].x) << "player " << i;
+    EXPECT_EQ(out.players[i].y, s.players[i].y) << "player " << i;
+    EXPECT_EQ(out.players[i].vx, s.players[i].vx) << "player " << i;
+    EXPECT_EQ(out.players[i].vy, s.players[i].vy) << "player " << i;
+    EXPECT_EQ(out.players[i].radius, s.players[i].radius) << "player " << i;
+  }
+}
+
+TEST(WorldSnapshotCodecTest, EmptySnapshotRoundTrips) {
+  sim::WorldSnapshot s{};
+  s.tick = 1234;
+  s.count = 0;
+
+  std::array<std::byte, kSnapshotFixedBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshot(s, w));
+  const std::array<std::byte, kSnapshotFixedBytes> expected = {
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+  EXPECT_EQ(buf, expected);
+
+  ByteReader r(buf);
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, 1234u);
+  EXPECT_EQ(out.count, 0u);
+}
+
+TEST(WorldSnapshotCodecTest, RejectsOutOfRangeCount) {
+  auto withCount = [](uint32_t count) {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size()> bytes =
+        kGoldenTwoPlayerSnapshotBytes;
+    bytes[4] = std::byte(count & 0xFFu);
+    bytes[5] = std::byte((count >> 8) & 0xFFu);
+    bytes[6] = std::byte((count >> 16) & 0xFFu);
+    bytes[7] = std::byte((count >> 24) & 0xFFu);
+    return bytes;
+  };
+
+  {
+    const auto bytes = withCount(33);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const auto bytes = withCount(0xFFFFFFFFu);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+}
+
+TEST(WorldSnapshotCodecTest, RejectsPayloadThatOutrunsItsCount) {
+  auto withCount = [](uint32_t count) {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size()> bytes =
+        kGoldenTwoPlayerSnapshotBytes;
+    bytes[4] = std::byte(count & 0xFFu);
+    bytes[5] = std::byte((count >> 8) & 0xFFu);
+    bytes[6] = std::byte((count >> 16) & 0xFFu);
+    bytes[7] = std::byte((count >> 24) & 0xFFu);
+    return bytes;
+  };
+
+  {
+    const auto bytes = withCount(1);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const auto bytes = withCount(0);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size() + 1> overlong{};
+    for (size_t i = 0; i < kGoldenTwoPlayerSnapshotBytes.size(); ++i) {
+      overlong[i] = kGoldenTwoPlayerSnapshotBytes[i];
+    }
+    overlong[kGoldenTwoPlayerSnapshotBytes.size()] = std::byte{0xEE};
+    ByteReader r(overlong);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+
+  // Under-long payloads are already caught by ByteReader's sticky ok();
+  // pinned here against a later refactor loosening it.
+  for (size_t prefix = 0; prefix < kGoldenTwoPlayerSnapshotBytes.size(); ++prefix) {
+    ByteReader r(std::span<const std::byte>(kGoldenTwoPlayerSnapshotBytes).subspan(0, prefix));
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out)) << "prefix " << prefix;
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+  {
+    const auto bytes = withCount(3);
+    ByteReader r(std::span<const std::byte>(bytes).subspan(0, kGoldenTwoPlayerSnapshotBytes.size()));
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+
+  ByteReader r(kGoldenTwoPlayerSnapshotBytes);
+  sim::WorldSnapshot out{};
+  EXPECT_TRUE(decodeSnapshot(r, out));
+}
+
+TEST(InputCommandCodecTest, RejectsNonFiniteFloats) {
+  auto withMoveXBytes = [](std::array<std::byte, 4> bits) {
+    std::array<std::byte, kInputBytes> bytes = {
+        std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+        bits[0],         bits[1],         bits[2],         bits[3],
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+        std::byte{0x01}};
+    return bytes;
+  };
+
+  // Quiet NaN: 00 00 C0 7F (little-endian bytes of 0x7FC00000).
+  const auto nan_bytes =
+      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0xC0}, std::byte{0x7F}});
+  // +Infinity: 00 00 80 7F (little-endian bytes of 0x7F800000).
+  const auto inf_bytes =
+      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x7F}});
+
+  for (const auto& bytes : {nan_bytes, inf_bytes}) {
+    ByteReader r(bytes);
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out));
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu);
+  }
+}
+
+TEST(WorldSnapshotCodecTest, RejectsNonFinitePlayerFloats) {
+  std::array<std::byte, kSnapshotFixedBytes + kPlayerStateBytes> bytes = {
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      // x = +Infinity: 00 00 80 7F
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x7F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xBF},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F}};
+
+  ByteReader r(bytes);
+  sim::WorldSnapshot out{};
+  out.tick = 0xAAAAAAAAu;
+  EXPECT_FALSE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+}
+
+}  // namespace
+}  // namespace net
