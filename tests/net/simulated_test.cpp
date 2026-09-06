@@ -230,5 +230,38 @@ TEST(SimulatedTransportTest, JitterReordersDeliveryReproducibly) {
   EXPECT_NE(delivered, delivered_other_seed);
 }
 
+TEST(SimulatedTransportTest, DelayBufferIsBoundedAndReportsWhatItDropped) {
+  static_assert(kDelayCapacity == 128);
+  static_assert(kLoopbackCapacity == 256);
+
+  LoopbackTransport a(kEndpointA);
+  LoopbackTransport b(kEndpointB);
+  a.connect(b);
+  SimulatedTransport<LoopbackTransport> sim_b(
+      b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 3});
+  ASSERT_EQ(msToTicks(200), 12u);
+
+  for (uint32_t i = 0; i < 200; ++i) {
+    const std::array<std::byte, 1> payload{static_cast<std::byte>(i & 0xFF)};
+    ASSERT_TRUE(a.send(b.self(), payload));
+  }
+
+  PacketSlot slot;
+  EXPECT_FALSE(sim_b.tryReceive(slot));
+  EXPECT_EQ(sim_b.droppedByCapacity(), 72u);
+  EXPECT_EQ(sim_b.droppedByLoss(), 0u);
+  EXPECT_EQ(b.inboxSize(), 0u);
+
+  std::vector<uint32_t> delivered;
+  for (int t = 0; t < 20; ++t) {
+    while (sim_b.tryReceive(slot)) {
+      delivered.push_back(std::to_integer<uint32_t>(slot.data[0]));
+    }
+    sim_b.advanceTick();
+  }
+  ASSERT_EQ(delivered.size(), 128u);
+  for (uint32_t i = 0; i < 128; ++i) EXPECT_EQ(delivered[i], i) << "index " << i;
+}
+
 }  // namespace
 }  // namespace net
