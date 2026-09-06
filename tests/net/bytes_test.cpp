@@ -66,5 +66,32 @@ TEST(ByteWriterTest, OverflowIsStickyAndBlocksLaterWrites) {
   EXPECT_EQ(w.size(), 2u);
 }
 
+TEST(ByteReaderTest, RoundTripsByteWriterOutput) {
+  std::array<std::byte, 15> buf{};
+  ByteWriter w(buf);
+  w.u8(0x54);
+  w.u16(0xBEEF);
+  w.u32(0xDEADC0DE);
+  w.f32(3.5f);
+  w.f32(-0.0f);
+  ASSERT_TRUE(w.ok());
+  ASSERT_EQ(w.size(), 15u);
+
+  ByteReader r(buf);
+  EXPECT_EQ(r.u8(), 0x54);
+  EXPECT_EQ(r.u16(), 0xBEEF);
+  EXPECT_EQ(r.u32(), 0xDEADC0DEu);
+  EXPECT_FLOAT_EQ(r.f32(), 3.5f);
+
+  const float neg_zero = r.f32();
+  EXPECT_TRUE(r.ok());
+  uint32_t neg_zero_bits = 0;
+  std::memcpy(&neg_zero_bits, &neg_zero, sizeof(neg_zero_bits));
+  EXPECT_EQ(neg_zero_bits, 0x80000000u);
+
+  EXPECT_EQ(r.remaining(), 0u);
+  EXPECT_TRUE(r.ok());
+}
+
 }  // namespace
 }  // namespace net
