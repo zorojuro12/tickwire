@@ -20,7 +20,6 @@ bool decodeHeader(ByteReader& r, PacketHeader& out) {
   h.magic = r.u32();
   h.version = r.u8();
   const uint8_t raw_type = r.u8();
-  h.type = static_cast<MsgType>(raw_type);
   h.payload_len = r.u16();
   h.tick = r.u32();
   h.send_time_ms = r.u32();
@@ -29,7 +28,11 @@ bool decodeHeader(ByteReader& r, PacketHeader& out) {
   h.ack_seq = r.u16();
 
   if (!r.ok()) return false;
+  if (h.magic != kProtocolMagic) return false;
+  if (h.version != kProtocolVersion) return false;
+  if (raw_type == 0 || raw_type > kMaxMsgType) return false;
 
+  h.type = static_cast<MsgType>(raw_type);
   out = h;
   return true;
 }

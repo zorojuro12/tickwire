@@ -70,5 +70,33 @@ TEST(ProtocolHeaderTest, ShortBufferIsRejectedAndLeavesOutputUntouched) {
   }
 }
 
+TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
+  auto mutated = [](size_t byte_index, uint8_t value) {
+    std::array<std::byte, kHeaderBytes> bytes = kGoldenHeaderBytes;
+    bytes[byte_index] = std::byte{value};
+    return bytes;
+  };
+
+  const std::array<std::array<std::byte, kHeaderBytes>, 5> cases = {
+      mutated(0, 0x55),  // wrong magic
+      mutated(4, 0x02),  // wrong version
+      mutated(5, 0x00),  // MsgType::kInvalid
+      mutated(5, 0x06),  // one past kMaxMsgType
+      mutated(5, 0xFF),
+  };
+
+  for (size_t i = 0; i < cases.size(); ++i) {
+    ByteReader r(cases[i]);
+    PacketHeader out;
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHeader(r, out)) << "case " << i;
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu) << "case " << i;
+  }
+
+  ByteReader r(kGoldenHeaderBytes);
+  PacketHeader out;
+  EXPECT_TRUE(decodeHeader(r, out));
+}
+
 }  // namespace
 }  // namespace net
