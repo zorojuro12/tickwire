@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -96,6 +97,90 @@ TEST(SimulatedTransportTest, LatencyIsMeasuredFromArrivalNotConstruction) {
   PacketSlot slot;
   ASSERT_TRUE(sim_b.tryReceive(slot));
   EXPECT_EQ(slot.data[0], std::byte{0xCD});
+}
+
+std::vector<uint32_t> runLossTrial(const SimConfig& cfg) {
+  LoopbackTransport a(kEndpointA);
+  LoopbackTransport b(kEndpointB);
+  a.connect(b);
+  SimulatedTransport<LoopbackTransport> sim_b(b, cfg);
+
+  std::vector<uint32_t> delivered;
+  for (uint32_t i = 0; i < 1000; ++i) {
+    std::array<std::byte, 4> payload{};
+    std::memcpy(payload.data(), &i, sizeof(i));
+    EXPECT_TRUE(a.send(b.self(), payload));
+
+    PacketSlot slot;
+    while (sim_b.tryReceive(slot)) {
+      uint32_t v = 0;
+      std::memcpy(&v, slot.data.data(), sizeof(v));
+      delivered.push_back(v);
+    }
+    sim_b.advanceTick();
+  }
+  return delivered;
+}
+
+TEST(SimulatedTransportTest, LossIsProbabilisticAndReproducibleForIdenticalSeeds) {
+  {
+    const auto delivered =
+        runLossTrial(SimConfig{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 0, .seed = 7});
+    EXPECT_EQ(delivered.size(), 1000u);
+    for (uint32_t i = 0; i < delivered.size(); ++i) EXPECT_EQ(delivered[i], i);
+  }
+
+  {
+    LoopbackTransport a(kEndpointA);
+    LoopbackTransport b(kEndpointB);
+    a.connect(b);
+    SimulatedTransport<LoopbackTransport> sim_b(
+        b, SimConfig{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 1000, .seed = 7});
+    const auto delivered = [&] {
+      std::vector<uint32_t> out;
+      for (uint32_t i = 0; i < 1000; ++i) {
+        std::array<std::byte, 4> payload{};
+        std::memcpy(payload.data(), &i, sizeof(i));
+        EXPECT_TRUE(a.send(b.self(), payload));
+        PacketSlot slot;
+        while (sim_b.tryReceive(slot)) out.push_back(i);
+        sim_b.advanceTick();
+      }
+      return out;
+    }();
+    EXPECT_EQ(delivered.size(), 0u);
+    EXPECT_EQ(sim_b.droppedByLoss(), 1000u);
+  }
+
+  const SimConfig partial_cfg{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 250, .seed = 7};
+  const auto partial = runLossTrial(partial_cfg);
+  EXPECT_GT(partial.size(), 0u);
+  EXPECT_LT(partial.size(), 1000u);
+  for (size_t i = 1; i < partial.size(); ++i) EXPECT_LT(partial[i - 1], partial[i]);
+
+  {
+    LoopbackTransport a(kEndpointA);
+    LoopbackTransport b(kEndpointB);
+    a.connect(b);
+    SimulatedTransport<LoopbackTransport> sim_b(b, partial_cfg);
+    uint32_t delivered_count = 0;
+    for (uint32_t i = 0; i < 1000; ++i) {
+      std::array<std::byte, 4> payload{};
+      std::memcpy(payload.data(), &i, sizeof(i));
+      ASSERT_TRUE(a.send(b.self(), payload));
+      PacketSlot slot;
+      while (sim_b.tryReceive(slot)) ++delivered_count;
+      sim_b.advanceTick();
+    }
+    EXPECT_EQ(sim_b.droppedByLoss() + delivered_count, 1000u);
+  }
+
+  const auto partial_again = runLossTrial(partial_cfg);
+  EXPECT_EQ(partial, partial_again);
+
+  const auto other_seed = runLossTrial(
+      SimConfig{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 250, .seed = 8});
+  EXPECT_NE(partial, other_seed);
 }
 
 }  // namespace

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <span>
 
 #include "net/transport.h"
@@ -35,7 +36,8 @@ class SimulatedTransport {
       : inner_(inner),
         cfg_(cfg),
         latency_ticks_(msToTicks(cfg.latency_ms)),
-        jitter_ticks_(msToTicks(cfg.jitter_ms)) {}
+        jitter_ticks_(msToTicks(cfg.jitter_ms)),
+        rng_(cfg.seed) {}
 
   bool send(const Endpoint& to, std::span<const std::byte> payload) {
     return inner_.send(to, payload);
@@ -44,7 +46,16 @@ class SimulatedTransport {
   bool tryReceive(PacketSlot& slot) {
     PacketSlot tmp;
     while (inner_.tryReceive(tmp)) {
+      const uint64_t r_loss = rng_();
+      const uint64_t r_jitter = rng_();
+
+      if (r_loss % 1000u < cfg_.loss_permille) {
+        ++dropped_by_loss_;
+        continue;
+      }
+
       const uint64_t delivery_tick = tick_ + latency_ticks_;
+      (void)r_jitter;
 
       bool inserted = false;
       for (Entry& e : delay_buf_) {
@@ -98,6 +109,7 @@ class SimulatedTransport {
   uint64_t seq_counter_ = 0;
   uint64_t dropped_by_loss_ = 0;
   uint64_t dropped_by_capacity_ = 0;
+  std::mt19937_64 rng_;
   std::array<Entry, kDelayCapacity> delay_buf_{};
 };
 
