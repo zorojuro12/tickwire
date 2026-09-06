@@ -20,24 +20,24 @@ TEST(SimulatedTransportTest, TransparentWhenEverythingIsZeroed) {
   auto b = std::make_unique<LoopbackTransport>(kEndpointB);
   a->connect(*b);
 
-  SimulatedTransport<LoopbackTransport> sim_b(*b, SimConfig{});
-  EXPECT_EQ(sim_b.tick(), 0u);
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(*b, SimConfig{});
+  EXPECT_EQ(sim_b->tick(), 0u);
 
   const std::array<std::byte, 5> payload = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                                              std::byte{0x04}, std::byte{0x05}};
   ASSERT_TRUE(a->send(b->self(), payload));
 
   PacketSlot slot;
-  ASSERT_TRUE(sim_b.tryReceive(slot));
+  ASSERT_TRUE(sim_b->tryReceive(slot));
   EXPECT_EQ(slot.len, 5u);
   EXPECT_EQ(std::memcmp(slot.data.data(), payload.data(), payload.size()), 0);
   EXPECT_EQ(slot.peer, a->self());
 
-  EXPECT_FALSE(sim_b.tryReceive(slot));
-  EXPECT_EQ(sim_b.droppedByLoss(), 0u);
-  EXPECT_EQ(sim_b.droppedByCapacity(), 0u);
+  EXPECT_FALSE(sim_b->tryReceive(slot));
+  EXPECT_EQ(sim_b->droppedByLoss(), 0u);
+  EXPECT_EQ(sim_b->droppedByCapacity(), 0u);
 
-  ASSERT_TRUE(sim_b.send(a->self(), payload));
+  ASSERT_TRUE(sim_b->send(a->self(), payload));
   PacketSlot slot_a;
   ASSERT_TRUE(a->tryReceive(slot_a));
   EXPECT_EQ(slot_a.peer, b->self());
@@ -53,7 +53,7 @@ TEST(SimulatedTransportTest, LatencyDelaysDeliveryByExactTicks) {
   auto b = std::make_unique<LoopbackTransport>(kEndpointB);
   a->connect(*b);
 
-  SimulatedTransport<LoopbackTransport> sim_b(
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(
       *b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 1});
   ASSERT_EQ(msToTicks(200), 12u);
 
@@ -62,16 +62,15 @@ TEST(SimulatedTransportTest, LatencyDelaysDeliveryByExactTicks) {
 
   for (uint64_t t = 0; t < 20; ++t) {
     PacketSlot slot;
-    const bool received = sim_b.tryReceive(slot);
+    const bool received = sim_b->tryReceive(slot);
     if (t == 12) {
       EXPECT_TRUE(received) << "tick " << t;
       EXPECT_EQ(slot.data[0], std::byte{0xAB});
     } else {
       EXPECT_FALSE(received) << "tick " << t;
     }
-    sim_b.advanceTick();
+    sim_b->advanceTick();
   }
-
 }
 
 TEST(SimulatedTransportTest, LatencyIsMeasuredFromArrivalNotConstruction) {
@@ -79,45 +78,45 @@ TEST(SimulatedTransportTest, LatencyIsMeasuredFromArrivalNotConstruction) {
   auto b = std::make_unique<LoopbackTransport>(kEndpointB);
   a->connect(*b);
 
-  SimulatedTransport<LoopbackTransport> sim_b(
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(
       *b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 1});
 
-  for (uint64_t t = 0; t < 5; ++t) sim_b.advanceTick();
-  ASSERT_EQ(sim_b.tick(), 5u);
+  for (uint64_t t = 0; t < 5; ++t) sim_b->advanceTick();
+  ASSERT_EQ(sim_b->tick(), 5u);
 
   const std::array<std::byte, 1> payload{std::byte{0xCD}};
   ASSERT_TRUE(a->send(b->self(), payload));
 
-  for (uint64_t t = sim_b.tick(); t < 17; ++t) {
+  for (uint64_t t = sim_b->tick(); t < 17; ++t) {
     PacketSlot slot;
-    EXPECT_FALSE(sim_b.tryReceive(slot)) << "tick " << t;
-    sim_b.advanceTick();
+    EXPECT_FALSE(sim_b->tryReceive(slot)) << "tick " << t;
+    sim_b->advanceTick();
   }
-  ASSERT_EQ(sim_b.tick(), 17u);
+  ASSERT_EQ(sim_b->tick(), 17u);
   PacketSlot slot;
-  ASSERT_TRUE(sim_b.tryReceive(slot));
+  ASSERT_TRUE(sim_b->tryReceive(slot));
   EXPECT_EQ(slot.data[0], std::byte{0xCD});
 }
 
 std::vector<uint32_t> runLossTrial(const SimConfig& cfg) {
-  LoopbackTransport a(kEndpointA);
-  LoopbackTransport b(kEndpointB);
-  a.connect(b);
-  SimulatedTransport<LoopbackTransport> sim_b(b, cfg);
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(*b, cfg);
 
   std::vector<uint32_t> delivered;
   for (uint32_t i = 0; i < 1000; ++i) {
     std::array<std::byte, 4> payload{};
     std::memcpy(payload.data(), &i, sizeof(i));
-    EXPECT_TRUE(a.send(b.self(), payload));
+    EXPECT_TRUE(a->send(b->self(), payload));
 
     PacketSlot slot;
-    while (sim_b.tryReceive(slot)) {
+    while (sim_b->tryReceive(slot)) {
       uint32_t v = 0;
       std::memcpy(&v, slot.data.data(), sizeof(v));
       delivered.push_back(v);
     }
-    sim_b.advanceTick();
+    sim_b->advanceTick();
   }
   return delivered;
 }
@@ -131,25 +130,25 @@ TEST(SimulatedTransportTest, LossIsProbabilisticAndReproducibleForIdenticalSeeds
   }
 
   {
-    LoopbackTransport a(kEndpointA);
-    LoopbackTransport b(kEndpointB);
-    a.connect(b);
-    SimulatedTransport<LoopbackTransport> sim_b(
-        b, SimConfig{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 1000, .seed = 7});
+    auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+    auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+    a->connect(*b);
+    auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(
+        *b, SimConfig{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 1000, .seed = 7});
     const auto delivered = [&] {
       std::vector<uint32_t> out;
       for (uint32_t i = 0; i < 1000; ++i) {
         std::array<std::byte, 4> payload{};
         std::memcpy(payload.data(), &i, sizeof(i));
-        EXPECT_TRUE(a.send(b.self(), payload));
+        EXPECT_TRUE(a->send(b->self(), payload));
         PacketSlot slot;
-        while (sim_b.tryReceive(slot)) out.push_back(i);
-        sim_b.advanceTick();
+        while (sim_b->tryReceive(slot)) out.push_back(i);
+        sim_b->advanceTick();
       }
       return out;
     }();
     EXPECT_EQ(delivered.size(), 0u);
-    EXPECT_EQ(sim_b.droppedByLoss(), 1000u);
+    EXPECT_EQ(sim_b->droppedByLoss(), 1000u);
   }
 
   const SimConfig partial_cfg{.latency_ms = 0, .jitter_ms = 0, .loss_permille = 250, .seed = 7};
@@ -159,20 +158,20 @@ TEST(SimulatedTransportTest, LossIsProbabilisticAndReproducibleForIdenticalSeeds
   for (size_t i = 1; i < partial.size(); ++i) EXPECT_LT(partial[i - 1], partial[i]);
 
   {
-    LoopbackTransport a(kEndpointA);
-    LoopbackTransport b(kEndpointB);
-    a.connect(b);
-    SimulatedTransport<LoopbackTransport> sim_b(b, partial_cfg);
+    auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+    auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+    a->connect(*b);
+    auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(*b, partial_cfg);
     uint32_t delivered_count = 0;
     for (uint32_t i = 0; i < 1000; ++i) {
       std::array<std::byte, 4> payload{};
       std::memcpy(payload.data(), &i, sizeof(i));
-      ASSERT_TRUE(a.send(b.self(), payload));
+      ASSERT_TRUE(a->send(b->self(), payload));
       PacketSlot slot;
-      while (sim_b.tryReceive(slot)) ++delivered_count;
-      sim_b.advanceTick();
+      while (sim_b->tryReceive(slot)) ++delivered_count;
+      sim_b->advanceTick();
     }
-    EXPECT_EQ(sim_b.droppedByLoss() + delivered_count, 1000u);
+    EXPECT_EQ(sim_b->droppedByLoss() + delivered_count, 1000u);
   }
 
   const auto partial_again = runLossTrial(partial_cfg);
@@ -184,26 +183,26 @@ TEST(SimulatedTransportTest, LossIsProbabilisticAndReproducibleForIdenticalSeeds
 }
 
 std::vector<uint32_t> runJitterTrial(uint64_t seed) {
-  LoopbackTransport a(kEndpointA);
-  LoopbackTransport b(kEndpointB);
-  a.connect(b);
-  SimulatedTransport<LoopbackTransport> sim_b(
-      b, SimConfig{.latency_ms = 100, .jitter_ms = 100, .loss_permille = 0, .seed = seed});
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(
+      *b, SimConfig{.latency_ms = 100, .jitter_ms = 100, .loss_permille = 0, .seed = seed});
 
   std::vector<uint32_t> delivered;
   for (uint32_t t = 0; t < 80; ++t) {
     if (t < 50) {
       std::array<std::byte, 4> payload{};
       std::memcpy(payload.data(), &t, sizeof(t));
-      EXPECT_TRUE(a.send(b.self(), payload));
+      EXPECT_TRUE(a->send(b->self(), payload));
     }
     PacketSlot slot;
-    while (sim_b.tryReceive(slot)) {
+    while (sim_b->tryReceive(slot)) {
       uint32_t v = 0;
       std::memcpy(&v, slot.data.data(), sizeof(v));
       delivered.push_back(v);
     }
-    sim_b.advanceTick();
+    sim_b->advanceTick();
   }
   return delivered;
 }
@@ -234,30 +233,30 @@ TEST(SimulatedTransportTest, DelayBufferIsBoundedAndReportsWhatItDropped) {
   static_assert(kDelayCapacity == 128);
   static_assert(kLoopbackCapacity == 256);
 
-  LoopbackTransport a(kEndpointA);
-  LoopbackTransport b(kEndpointB);
-  a.connect(b);
-  SimulatedTransport<LoopbackTransport> sim_b(
-      b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 3});
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  a->connect(*b);
+  auto sim_b = std::make_unique<SimulatedTransport<LoopbackTransport>>(
+      *b, SimConfig{.latency_ms = 200, .jitter_ms = 0, .loss_permille = 0, .seed = 3});
   ASSERT_EQ(msToTicks(200), 12u);
 
   for (uint32_t i = 0; i < 200; ++i) {
     const std::array<std::byte, 1> payload{static_cast<std::byte>(i & 0xFF)};
-    ASSERT_TRUE(a.send(b.self(), payload));
+    ASSERT_TRUE(a->send(b->self(), payload));
   }
 
   PacketSlot slot;
-  EXPECT_FALSE(sim_b.tryReceive(slot));
-  EXPECT_EQ(sim_b.droppedByCapacity(), 72u);
-  EXPECT_EQ(sim_b.droppedByLoss(), 0u);
-  EXPECT_EQ(b.inboxSize(), 0u);
+  EXPECT_FALSE(sim_b->tryReceive(slot));
+  EXPECT_EQ(sim_b->droppedByCapacity(), 72u);
+  EXPECT_EQ(sim_b->droppedByLoss(), 0u);
+  EXPECT_EQ(b->inboxSize(), 0u);
 
   std::vector<uint32_t> delivered;
   for (int t = 0; t < 20; ++t) {
-    while (sim_b.tryReceive(slot)) {
+    while (sim_b->tryReceive(slot)) {
       delivered.push_back(std::to_integer<uint32_t>(slot.data[0]));
     }
-    sim_b.advanceTick();
+    sim_b->advanceTick();
   }
   ASSERT_EQ(delivered.size(), 128u);
   for (uint32_t i = 0; i < 128; ++i) EXPECT_EQ(delivered[i], i) << "index " << i;
