@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "net/bytes.h"
+#include "net/transport.h"
 
 namespace net {
 

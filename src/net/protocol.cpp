@@ -31,6 +31,8 @@ bool decodeHeader(ByteReader& r, PacketHeader& out) {
   if (h.magic != kProtocolMagic) return false;
   if (h.version != kProtocolVersion) return false;
   if (raw_type == 0 || raw_type > kMaxMsgType) return false;
+  if (h.payload_len > kMaxPacket - kHeaderBytes) return false;
+  if (r.remaining() != h.payload_len) return false;
 
   h.type = static_cast<MsgType>(raw_type);
   out = h;
