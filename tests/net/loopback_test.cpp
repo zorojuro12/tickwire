@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <type_traits>
 
 #include <gtest/gtest.h>
 
@@ -114,6 +115,13 @@ TEST(LoopbackTransportTest, RejectsSendsToAnythingButTheConnectedPeer) {
   EXPECT_EQ(b->inboxSize(), 0u);
 
   EXPECT_TRUE(a->send(b->self(), payload));
+}
+
+TEST(LoopbackTransportTest, IsNeitherCopyableNorMovable) {
+  static_assert(!std::is_copy_constructible_v<LoopbackTransport>);
+  static_assert(!std::is_copy_assignable_v<LoopbackTransport>);
+  static_assert(!std::is_move_constructible_v<LoopbackTransport>);
+  static_assert(!std::is_move_assignable_v<LoopbackTransport>);
 }
 
 }  // namespace

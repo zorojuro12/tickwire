@@ -20,6 +20,15 @@ class LoopbackTransport {
  public:
   explicit LoopbackTransport(Endpoint self) noexcept;
 
+  // Connected instances hold a raw back-pointer to each other (see
+  // connect()); copying or moving would leave one side's peer_ dangling or
+  // stale. Not needed by any current use, so deleted outright rather than
+  // implemented to re-link both sides.
+  LoopbackTransport(const LoopbackTransport&) = delete;
+  LoopbackTransport& operator=(const LoopbackTransport&) = delete;
+  LoopbackTransport(LoopbackTransport&&) = delete;
+  LoopbackTransport& operator=(LoopbackTransport&&) = delete;
+
   void connect(LoopbackTransport& peer) noexcept;
   Endpoint self() const noexcept;
 
