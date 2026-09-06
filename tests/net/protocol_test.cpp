@@ -348,5 +348,68 @@ TEST(WorldSnapshotCodecTest, RejectsOutOfRangeCount) {
   }
 }
 
+TEST(WorldSnapshotCodecTest, RejectsPayloadThatOutrunsItsCount) {
+  auto withCount = [](uint32_t count) {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size()> bytes =
+        kGoldenTwoPlayerSnapshotBytes;
+    bytes[4] = std::byte(count & 0xFFu);
+    bytes[5] = std::byte((count >> 8) & 0xFFu);
+    bytes[6] = std::byte((count >> 16) & 0xFFu);
+    bytes[7] = std::byte((count >> 24) & 0xFFu);
+    return bytes;
+  };
+
+  {
+    const auto bytes = withCount(1);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const auto bytes = withCount(0);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size() + 1> overlong{};
+    for (size_t i = 0; i < kGoldenTwoPlayerSnapshotBytes.size(); ++i) {
+      overlong[i] = kGoldenTwoPlayerSnapshotBytes[i];
+    }
+    overlong[kGoldenTwoPlayerSnapshotBytes.size()] = std::byte{0xEE};
+    ByteReader r(overlong);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+
+  // Under-long payloads are already caught by ByteReader's sticky ok();
+  // pinned here against a later refactor loosening it.
+  for (size_t prefix = 0; prefix < kGoldenTwoPlayerSnapshotBytes.size(); ++prefix) {
+    ByteReader r(std::span<const std::byte>(kGoldenTwoPlayerSnapshotBytes).subspan(0, prefix));
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out)) << "prefix " << prefix;
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+  {
+    const auto bytes = withCount(3);
+    ByteReader r(std::span<const std::byte>(bytes).subspan(0, kGoldenTwoPlayerSnapshotBytes.size()));
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+
+  ByteReader r(kGoldenTwoPlayerSnapshotBytes);
+  sim::WorldSnapshot out{};
+  EXPECT_TRUE(decodeSnapshot(r, out));
+}
+
 }  // namespace
 }  // namespace net

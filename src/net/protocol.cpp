@@ -88,6 +88,7 @@ bool decodeSnapshot(ByteReader& r, sim::WorldSnapshot& out) {
 
   if (!r.ok()) return false;
   if (s.count > sim::kMaxPlayers) return false;
+  if (r.remaining() != static_cast<size_t>(s.count) * kPlayerStateBytes) return false;
 
   for (uint32_t i = 0; i < s.count; ++i) {
     sim::PlayerState& p = s.players[i];
