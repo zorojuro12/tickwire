@@ -5,6 +5,7 @@
 
 #include "net/bytes.h"
 #include "net/transport.h"
+#include "sim/sim.h"
 
 namespace net {
 
@@ -36,5 +37,16 @@ struct PacketHeader {
 
 bool encodeHeader(const PacketHeader& h, ByteWriter& w);
 bool decodeHeader(ByteReader& r, PacketHeader& out);
+
+inline constexpr size_t kInputBytes = 17;
+inline constexpr size_t kPlayerStateBytes = 24;
+inline constexpr size_t kSnapshotFixedBytes = 8;  // tick + count
+static_assert(kHeaderBytes + kSnapshotFixedBytes + sim::kMaxPlayers * kPlayerStateBytes <=
+              kMaxPacket);
+
+bool encodeInput(const sim::InputCommand& in, ByteWriter& w);
+bool decodeInput(ByteReader& r, sim::InputCommand& out);
+bool encodeSnapshot(const sim::WorldSnapshot& s, ByteWriter& w);
+bool decodeSnapshot(ByteReader& r, sim::WorldSnapshot& out);
 
 }  // namespace net

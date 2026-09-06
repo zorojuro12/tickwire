@@ -39,4 +39,29 @@ bool decodeHeader(ByteReader& r, PacketHeader& out) {
   return true;
 }
 
+bool encodeInput(const sim::InputCommand& in, ByteWriter& w) {
+  w.u32(in.player_id);
+  w.u32(in.tick);
+  w.f32(in.move_x);
+  w.f32(in.move_y);
+  w.u8(in.fire ? 1 : 0);
+  return w.ok();
+}
+
+bool decodeInput(ByteReader& r, sim::InputCommand& out) {
+  if (r.remaining() != kInputBytes) return false;
+
+  sim::InputCommand in{};
+  in.player_id = r.u32();
+  in.tick = r.u32();
+  in.move_x = r.f32();
+  in.move_y = r.f32();
+  in.fire = r.u8() != 0;
+
+  if (!r.ok()) return false;
+
+  out = in;
+  return true;
+}
+
 }  // namespace net

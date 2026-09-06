@@ -159,5 +159,90 @@ TEST(ProtocolHeaderTest, RejectsPayloadLenThatDisagreesWithThePacket) {
   EXPECT_TRUE(decodeHeader(r, out));
 }
 
+TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
+  const sim::InputCommand in{
+      .player_id = 3, .tick = 1234, .move_x = 1.0f, .move_y = -0.5f, .fire = true};
+
+  std::array<std::byte, kInputBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeInput(in, w));
+  EXPECT_EQ(w.size(), kInputBytes);
+
+  const std::array<std::byte, kInputBytes> expected = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x01}};
+  EXPECT_EQ(buf, expected);
+
+  ByteReader r(buf);
+  sim::InputCommand out{};
+  ASSERT_TRUE(decodeInput(r, out));
+  EXPECT_EQ(out.player_id, in.player_id);
+  EXPECT_EQ(out.tick, in.tick);
+  uint32_t move_x_bits = 0, expected_move_x_bits = 0;
+  std::memcpy(&move_x_bits, &out.move_x, sizeof(move_x_bits));
+  std::memcpy(&expected_move_x_bits, &in.move_x, sizeof(expected_move_x_bits));
+  EXPECT_EQ(move_x_bits, expected_move_x_bits);
+  uint32_t move_y_bits = 0, expected_move_y_bits = 0;
+  std::memcpy(&move_y_bits, &out.move_y, sizeof(move_y_bits));
+  std::memcpy(&expected_move_y_bits, &in.move_y, sizeof(expected_move_y_bits));
+  EXPECT_EQ(move_y_bits, expected_move_y_bits);
+  EXPECT_EQ(out.fire, in.fire);
+}
+
+TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
+  std::array<std::byte, kInputBytes> buf = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x00}};
+
+  {
+    ByteReader r(buf);
+    sim::InputCommand out{};
+    ASSERT_TRUE(decodeInput(r, out));
+    EXPECT_FALSE(out.fire);
+  }
+
+  buf[16] = std::byte{0x7F};
+  {
+    ByteReader r(buf);
+    sim::InputCommand out{};
+    ASSERT_TRUE(decodeInput(r, out));
+    EXPECT_TRUE(out.fire);
+  }
+}
+
+TEST(InputCommandCodecTest, RejectsFramingMismatch) {
+  const std::array<std::byte, kInputBytes> golden = {
+      std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x01}};
+
+  for (size_t prefix = 0; prefix < kInputBytes; ++prefix) {
+    ByteReader r(std::span<const std::byte>(golden).subspan(0, prefix));
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out)) << "prefix " << prefix;
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+
+  std::array<std::byte, kInputBytes + 1> overlong{};
+  for (size_t i = 0; i < kInputBytes; ++i) overlong[i] = golden[i];
+  overlong[kInputBytes] = std::byte{0xEE};
+  {
+    ByteReader r(overlong);
+    sim::InputCommand out{};
+    out.player_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeInput(r, out));
+    EXPECT_EQ(out.player_id, 0xAAAAAAAAu);
+  }
+}
+
 }  // namespace
 }  // namespace net
