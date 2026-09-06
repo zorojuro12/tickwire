@@ -24,6 +24,7 @@ class ByteWriter {
  private:
   std::span<std::byte> buf_;
   size_t cursor_ = 0;
+  bool ok_ = true;
 };
 
 // Bounds-checked little-endian read cursor over a caller-owned buffer.

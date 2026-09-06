@@ -48,5 +48,23 @@ TEST(ByteWriterTest, OverflowingWriteTouchesNothing) {
   EXPECT_EQ(w.size(), 0u);
 }
 
+TEST(ByteWriterTest, OverflowIsStickyAndBlocksLaterWrites) {
+  std::array<std::byte, 3> buf{};
+  ByteWriter w(buf);
+
+  EXPECT_TRUE(w.ok());
+  w.u16(0x1234);
+  EXPECT_TRUE(w.ok());
+  EXPECT_EQ(w.size(), 2u);
+
+  w.u32(0);
+  EXPECT_FALSE(w.ok());
+  EXPECT_EQ(w.size(), 2u);
+
+  w.u8(0x7F);
+  EXPECT_FALSE(w.ok());
+  EXPECT_EQ(w.size(), 2u);
+}
+
 }  // namespace
 }  // namespace net
