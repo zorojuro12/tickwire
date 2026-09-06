@@ -14,8 +14,8 @@ void LoopbackTransport::connect(LoopbackTransport& peer) noexcept {
 Endpoint LoopbackTransport::self() const noexcept { return self_; }
 
 bool LoopbackTransport::send(const Endpoint& to, std::span<const std::byte> payload) {
-  (void)to;
   if (peer_ == nullptr) return false;
+  if (!(to == peer_->self())) return false;
   if (payload.size() > kMaxPacket) return false;
   if (peer_->write_ - peer_->read_ == kLoopbackCapacity) return false;
 

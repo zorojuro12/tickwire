@@ -96,5 +96,25 @@ TEST(LoopbackTransportTest, FullInboxDropsNewPacketWithoutDisturbingQueued) {
   EXPECT_FALSE(b->tryReceive(slot));
 }
 
+TEST(LoopbackTransportTest, RejectsSendsToAnythingButTheConnectedPeer) {
+  auto a = std::make_unique<LoopbackTransport>(kEndpointA);
+  auto b = std::make_unique<LoopbackTransport>(kEndpointB);
+  auto c = std::make_unique<LoopbackTransport>(Endpoint{0x7F000001u, 0x2001u});
+  a->connect(*b);
+
+  const std::array<std::byte, 1> payload{std::byte{0x01}};
+
+  EXPECT_FALSE(a->send(Endpoint{0x7F000001u, 0x2000u}, payload));
+  EXPECT_EQ(b->inboxSize(), 0u);
+
+  EXPECT_FALSE(a->send(Endpoint{}, payload));
+  EXPECT_EQ(b->inboxSize(), 0u);
+
+  EXPECT_FALSE(c->send(a->self(), payload));
+  EXPECT_EQ(b->inboxSize(), 0u);
+
+  EXPECT_TRUE(a->send(b->self(), payload));
+}
+
 }  // namespace
 }  // namespace net
