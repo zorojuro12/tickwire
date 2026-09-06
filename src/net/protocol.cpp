@@ -64,4 +64,45 @@ bool decodeInput(ByteReader& r, sim::InputCommand& out) {
   return true;
 }
 
+bool encodeSnapshot(const sim::WorldSnapshot& s, ByteWriter& w) {
+  if (s.count > sim::kMaxPlayers) return false;
+
+  w.u32(s.tick);
+  w.u32(s.count);
+  for (uint32_t i = 0; i < s.count; ++i) {
+    const sim::PlayerState& p = s.players[i];
+    w.u32(p.id);
+    w.f32(p.x);
+    w.f32(p.y);
+    w.f32(p.vx);
+    w.f32(p.vy);
+    w.f32(p.radius);
+  }
+  return w.ok();
+}
+
+bool decodeSnapshot(ByteReader& r, sim::WorldSnapshot& out) {
+  sim::WorldSnapshot s{};
+  s.tick = r.u32();
+  s.count = r.u32();
+
+  if (!r.ok()) return false;
+  if (s.count > sim::kMaxPlayers) return false;
+
+  for (uint32_t i = 0; i < s.count; ++i) {
+    sim::PlayerState& p = s.players[i];
+    p.id = r.u32();
+    p.x = r.f32();
+    p.y = r.f32();
+    p.vx = r.f32();
+    p.vy = r.f32();
+    p.radius = r.f32();
+  }
+
+  if (!r.ok()) return false;
+
+  out = s;
+  return true;
+}
+
 }  // namespace net

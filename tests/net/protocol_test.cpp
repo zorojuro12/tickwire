@@ -244,5 +244,109 @@ TEST(InputCommandCodecTest, RejectsFramingMismatch) {
   }
 }
 
+constexpr std::array<std::byte, kSnapshotFixedBytes + 2 * kPlayerStateBytes>
+    kGoldenTwoPlayerSnapshotBytes = {
+        std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+
+        std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xBF},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F},
+
+        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0xC0},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0xC0}, std::byte{0x3F},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x3F}};
+
+sim::WorldSnapshot goldenTwoPlayerSnapshot() {
+  sim::WorldSnapshot s{};
+  s.tick = 1234;
+  s.count = 2;
+  s.players[0] = {.id = 1, .x = 2.0f, .y = 3.0f, .vx = 0.0f, .vy = -1.0f, .radius = 0.5f};
+  s.players[1] = {.id = 2, .x = -4.0f, .y = 0.0f, .vx = 1.5f, .vy = 0.0f, .radius = 0.5f};
+  s.players[2].id = 0xDEADBEEFu;
+  return s;
+}
+
+TEST(WorldSnapshotCodecTest, EncodesToExactBytesAndDecodesBack) {
+  const sim::WorldSnapshot s = goldenTwoPlayerSnapshot();
+
+  std::array<std::byte, 56> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshot(s, w));
+  EXPECT_EQ(w.size(), kSnapshotFixedBytes + 2 * kPlayerStateBytes);
+  for (size_t i = 0; i < kGoldenTwoPlayerSnapshotBytes.size(); ++i) {
+    EXPECT_EQ(buf[i], kGoldenTwoPlayerSnapshotBytes[i]) << "byte " << i;
+  }
+
+  ByteReader r(buf);
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, s.tick);
+  EXPECT_EQ(out.count, s.count);
+  for (uint32_t i = 0; i < s.count; ++i) {
+    EXPECT_EQ(out.players[i].id, s.players[i].id) << "player " << i;
+    EXPECT_EQ(out.players[i].x, s.players[i].x) << "player " << i;
+    EXPECT_EQ(out.players[i].y, s.players[i].y) << "player " << i;
+    EXPECT_EQ(out.players[i].vx, s.players[i].vx) << "player " << i;
+    EXPECT_EQ(out.players[i].vy, s.players[i].vy) << "player " << i;
+    EXPECT_EQ(out.players[i].radius, s.players[i].radius) << "player " << i;
+  }
+}
+
+TEST(WorldSnapshotCodecTest, EmptySnapshotRoundTrips) {
+  sim::WorldSnapshot s{};
+  s.tick = 1234;
+  s.count = 0;
+
+  std::array<std::byte, kSnapshotFixedBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshot(s, w));
+  const std::array<std::byte, kSnapshotFixedBytes> expected = {
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+  EXPECT_EQ(buf, expected);
+
+  ByteReader r(buf);
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(decodeSnapshot(r, out));
+  EXPECT_EQ(out.tick, 1234u);
+  EXPECT_EQ(out.count, 0u);
+}
+
+TEST(WorldSnapshotCodecTest, RejectsOutOfRangeCount) {
+  auto withCount = [](uint32_t count) {
+    std::array<std::byte, kGoldenTwoPlayerSnapshotBytes.size()> bytes =
+        kGoldenTwoPlayerSnapshotBytes;
+    bytes[4] = std::byte(count & 0xFFu);
+    bytes[5] = std::byte((count >> 8) & 0xFFu);
+    bytes[6] = std::byte((count >> 16) & 0xFFu);
+    bytes[7] = std::byte((count >> 24) & 0xFFu);
+    return bytes;
+  };
+
+  {
+    const auto bytes = withCount(33);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+  {
+    const auto bytes = withCount(0xFFFFFFFFu);
+    ByteReader r(bytes);
+    sim::WorldSnapshot out{};
+    out.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshot(r, out));
+    EXPECT_EQ(out.tick, 0xAAAAAAAAu);
+  }
+}
+
 }  // namespace
 }  // namespace net
