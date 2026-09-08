@@ -198,5 +198,115 @@ TEST(ClientTest, JunkPacketsAreIgnored) {
   EXPECT_EQ(c.snapshotsReceived(), 0u);
 }
 
+void injectSnapshot(RecordingTransport& tp, uint32_t tick, uint32_t send_time_ms,
+                     const sim::WorldSnapshot& snap) {
+  std::array<std::byte, net::kMaxPacket> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeSnapshot(snap, pw));
+  net::PacketHeader h;
+  h.type = net::MsgType::kSnapshot;
+  h.tick = tick;
+  h.send_time_ms = send_time_ms;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written =
+      net::framePacket(h, std::span<const std::byte>(payload).subspan(0, pw.size()), buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+sim::WorldSnapshot twoPlayerSnapshot(uint32_t tick) {
+  sim::WorldSnapshot s{};
+  s.tick = tick;
+  s.count = 2;
+  s.players[0] = {.id = 1, .x = 1.0f, .y = 2.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  s.players[1] = {.id = 2, .x = -3.0f, .y = 4.0f, .vx = 1.0f, .vy = -1.0f, .radius = 0.5f};
+  return s;
+}
+
+TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
+  RecordingTransport tp;
+  Client<RecordingTransport> c(tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(tp, 4, kJoinSeq);
+  c.tick(16);
+  ASSERT_EQ(c.playerId(), 4u);
+  const size_t sent_before_input = tp.sentCount();
+
+  EXPECT_TRUE(c.sendInput(2000, 1.0f, 0.0f, 0.0f, 1.0f, true));
+  ASSERT_EQ(tp.sentCount(), sent_before_input + 1);
+  {
+    const RecordingTransport::Sent& s = tp.sentAt(sent_before_input);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.type, net::MsgType::kInput);
+    EXPECT_EQ(h.send_time_ms, 2000u);
+    EXPECT_EQ(h.payload_len, net::kInputBytes);
+    sim::InputCommand in{};
+    ASSERT_TRUE(net::decodeInput(r, in));
+    EXPECT_EQ(in.player_id, 4u);
+    EXPECT_EQ(in.move_x, 1.0f);
+    EXPECT_EQ(in.move_y, 0.0f);
+    EXPECT_EQ(in.aim_x, 0.0f);
+    EXPECT_EQ(in.aim_y, 1.0f);
+    EXPECT_TRUE(in.fire);
+  }
+
+  injectSnapshot(tp, 30, 5000, twoPlayerSnapshot(30));
+  c.tick(2016);
+  EXPECT_EQ(c.snapshotsReceived(), 1u);
+  EXPECT_EQ(c.latestSnapshotTick(), 30u);
+  EXPECT_EQ(c.serverTimeMs(), 5000u);
+  ASSERT_EQ(c.latestSnapshot().count, 2u);
+  EXPECT_EQ(c.latestSnapshot().players[0].id, 1u);
+  EXPECT_EQ(c.latestSnapshot().players[0].x, 1.0f);
+  EXPECT_EQ(c.latestSnapshot().players[1].id, 2u);
+
+  // Stale (tick 27 after tick 30) is dropped, but still counted as received.
+  injectSnapshot(tp, 27, 5016, twoPlayerSnapshot(27));
+  c.tick(2032);
+  EXPECT_EQ(c.snapshotsReceived(), 2u);
+  EXPECT_EQ(c.latestSnapshotTick(), 30u);
+
+  // A newer one (tick 33) is adopted.
+  injectSnapshot(tp, 33, 5032, twoPlayerSnapshot(33));
+  c.tick(2048);
+  EXPECT_EQ(c.snapshotsReceived(), 3u);
+  EXPECT_EQ(c.latestSnapshotTick(), 33u);
+
+  // A malformed snapshot (count = 33) is ignored entirely.
+  {
+    std::array<std::byte, net::kSnapshotFixedBytes> bad_payload{};
+    net::ByteWriter pw(bad_payload);
+    pw.u32(99);
+    pw.u32(33);
+    net::PacketHeader h;
+    h.type = net::MsgType::kSnapshot;
+    h.tick = 40;
+    std::array<std::byte, net::kMaxPacket> buf{};
+    const size_t written = net::framePacket(h, bad_payload, buf);
+    ASSERT_GT(written, 0u);
+    tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+  }
+  c.tick(2064);
+  EXPECT_EQ(c.latestSnapshotTick(), 33u);
+
+  // leave() sends one kLeave and returns to kIdle.
+  const size_t sent_before_leave = tp.sentCount();
+  c.leave(3000);
+  ASSERT_EQ(tp.sentCount(), sent_before_leave + 1);
+  {
+    const RecordingTransport::Sent& s = tp.sentAt(sent_before_leave);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.type, net::MsgType::kLeave);
+    EXPECT_EQ(h.seq, kLeaveSeq);
+    EXPECT_EQ(h.payload_len, 0u);
+  }
+  EXPECT_EQ(c.state(), State::kIdle);
+  EXPECT_FALSE(c.sendInput(3016, 0.0f, 0.0f, 0.0f, 0.0f, false));
+}
+
 }  // namespace
 }  // namespace client
