@@ -46,6 +46,8 @@ bool encodeInput(const sim::InputCommand& in, ByteWriter& w) {
   w.u32(in.tick);
   w.f32(in.move_x);
   w.f32(in.move_y);
+  w.f32(in.aim_x);
+  w.f32(in.aim_y);
   w.u8(in.fire ? 1 : 0);
   return w.ok();
 }
@@ -58,10 +60,13 @@ bool decodeInput(ByteReader& r, sim::InputCommand& out) {
   in.tick = r.u32();
   in.move_x = r.f32();
   in.move_y = r.f32();
+  in.aim_x = r.f32();
+  in.aim_y = r.f32();
   in.fire = r.u8() != 0;
 
   if (!r.ok()) return false;
   if (!std::isfinite(in.move_x) || !std::isfinite(in.move_y)) return false;
+  if (!std::isfinite(in.aim_x) || !std::isfinite(in.aim_y)) return false;
 
   out = in;
   return true;

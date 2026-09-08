@@ -10,7 +10,7 @@
 namespace net {
 
 inline constexpr uint32_t kProtocolMagic = 0x52495754u;  // LE bytes spell "TWIR"
-inline constexpr uint8_t kProtocolVersion = 1;
+inline constexpr uint8_t kProtocolVersion = 2;  // was 1; aim_x/aim_y added to InputCommand
 inline constexpr size_t kHeaderBytes = 24;
 
 enum class MsgType : uint8_t {
@@ -38,7 +38,7 @@ struct PacketHeader {
 bool encodeHeader(const PacketHeader& h, ByteWriter& w);
 bool decodeHeader(ByteReader& r, PacketHeader& out);
 
-inline constexpr size_t kInputBytes = 17;
+inline constexpr size_t kInputBytes = 25;  // was 17
 inline constexpr size_t kPlayerStateBytes = 24;
 inline constexpr size_t kSnapshotFixedBytes = 8;  // tick + count
 static_assert(kHeaderBytes + kSnapshotFixedBytes + sim::kMaxPlayers * kPlayerStateBytes <=

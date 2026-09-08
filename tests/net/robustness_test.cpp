@@ -14,7 +14,8 @@ namespace {
 
 std::vector<std::byte> buildInputPacket() {
   const sim::InputCommand in{
-      .player_id = 3, .tick = 1234, .move_x = 1.0f, .move_y = -0.5f, .fire = true};
+      .player_id = 3, .tick = 1234,   .move_x = 1.0f, .move_y = -0.5f,
+      .aim_x = 0.0f,  .aim_y = 0.0f,  .fire = true};
   std::vector<std::byte> buf(kHeaderBytes + kInputBytes);
   ByteWriter w(buf);
   PacketHeader h;
@@ -159,11 +160,16 @@ TEST(RobustnessTest, EveryTruncationOfAFullSnapshotIsRejectedWithoutCrashing) {
 TEST(RobustnessTest, RandomByteBuffersNeverCrashADecoder) {
   // Plan-mandated seed 0xC0FFEE, combined with fixing payload_len to match
   // the buffer so corrupted trials actually reach a payload decoder (see
-  // commit message), produces zero InputCommand-length (41-byte) matches in
-  // 20,000 trials -- a statistical accident of this exact seed, not a
-  // decoder defect. Substituted seed 2, which reliably produces matches;
-  // recorded per docs/project-history.md P1 findings.
-  std::mt19937_64 rng{2u};
+  // commit message), produces zero InputCommand-length (kHeaderBytes +
+  // kInputBytes byte) matches in 20,000 trials -- a statistical accident of
+  // this exact seed, not a decoder defect. Same for the P1-era seed 2, which
+  // reliably produced matches at the old 41-byte InputCommand length but not
+  // the new 49-byte one added in P2's wire-format amendment. Substituted
+  // seed 1, computed (and confirmed against the actual build) to reliably
+  // produce matches at both InputCommand and WorldSnapshot payload shapes;
+  // recorded per docs/project-history.md P1/P2 findings, same escape hatch
+  // the plan authorizes for Task 6 Checkpoint 4's jitter-inversion seed.
+  std::mt19937_64 rng{1u};
   bool reached_payload_decoder = false;
   bool any_payload_decoded = false;
 

@@ -263,4 +263,101 @@ endpoint-to-player binding as a requirement, not an afterthought.
 
 ---
 
-<!-- Next section: ## P2 — Authoritative server, World, and libsim behavior -->
+## P2 — Authoritative server, `World`, first demo
+
+### Task 8 boundary — mandatory security review findings
+
+Threat model (same as P1's): an unauthenticated attacker controls every byte
+of every datagram, can send them at any rate, and can forge any source
+address the network lets through. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents over `src/server/`, `src/client/`, `apps/`, and
+`tests/`.
+
+**Verified closed — the P1-deferred finding.** P1 recorded (above) that no
+code path bound a decoded `InputCommand::player_id` to the UDP source
+`Endpoint` it arrived from. Grepping every call site of `World::applyInput`
+confirms exactly one: `Server::handleInput` (`src/server/server.h`), gated
+unconditionally by `SessionTable::authorize(from, in.player_id)` before the
+input reaches `World`. `resolveHitscan` is reached only after that same gate
+plus a cooldown check. `World::removePlayer` in `handleLeave` uses the id
+looked up from the caller's own recorded endpoint, never an attacker-supplied
+one. This defect is closed as designed.
+
+**Fixed — `tests/client/client_test.cpp` stack-allocated `RecordingTransport`
+(~1.24 MB) in all 8 tests.** Contradicted the project's own P1-established
+convention (heap-allocate large test objects via `std::make_unique`), which
+`tests/server/server_test.cpp` already follows for the identical type — a
+straightforward regression in the newer file, not an ambiguous case. A
+>1.2 MB base stack frame is a real overflow risk under ASan/TSan
+instrumentation. Fixed by switching to `std::make_unique`.
+
+**Fixed (footgun prevention) — `Server<T>` and `Client<T>` were copy-
+constructible.** Both hold a `T&` reference member, which blocks implicit
+copy/move *assignment* but not the copy *constructor* — copying either would
+deep-copy `World`/`SessionTable`/`PacketRing` while binding the copy's
+transport reference to the *same* transport as the original, giving two
+independent simulation/session states silently sharing one socket. Not
+currently reachable (every construction site uses `make_unique`), but deleted
+outright since nothing needs it.
+
+**Deferred, not fixed — `SessionTable` (900 B) stack-allocated in
+`tests/server/session_test.cpp` (9 tests).** Named by the project's
+large-test-object convention, but the reviewing agent's own assessment is
+"not a real safety hazard at this size" (well under any plausible stack
+limit even under ASan). Fixing it means touching dozens of call sites across
+9 tests for no real risk reduction; judged not worth the churn.
+
+**Deferred, not fixed — three CRITICAL findings, all one root cause: the
+protocol has no cryptographic session binding, so an attacker who can spoof
+UDP source addresses defeats address-based authorization entirely.** Put to
+the user explicitly (this is a risk-posture/scope decision, not an
+implementation detail); the user chose to defer and record, matching the
+treatment P1 gave its own two deferred findings.
+
+1. **Spoofable session authorization** (`SessionTable::authorize`,
+   `src/server/session.cpp`, consumed at `src/server/server.h`'s
+   `handleInput`/`handleLeave`). `authorize()` correctly implements its own
+   contract — bind endpoint to player id, reject a mismatch — but the
+   "endpoint" it trusts is the UDP source address, which is exactly the
+   value the stated threat model already grants an attacker the power to
+   forge. `player_id` is not a secret either: it is broadcast in cleartext
+   in every `Snapshot`. A forged-source `Input` or `Leave` packet naming a
+   known live player's id is indistinguishable from that player's own
+   traffic. This is not a missed check (see "Verified closed" above); it's
+   that the check's security property is exactly the capability the threat
+   model grants the attacker.
+2. **Join/snapshot amplification** (`Server::handleJoin` and
+   `broadcastSnapshot`, `src/server/server.h`) — a direct consequence of
+   Finding 1. A single ~24-byte forged `JoinRequest` creates a session
+   broadcasting `Snapshot` packets (up to 800 B at 32 players) at 20 Hz to
+   the forged address for up to `kSessionTimeoutTicks` (5 s) before it
+   expires — up to ~3,333x volumetric amplification from one attacker
+   packet, extendable indefinitely with a trickle of further forged `Input`
+   packets (which do refresh the session's liveness).
+3. **Session-table exhaustion** (`SessionTable::joinOrGet`,
+   `src/server/session.cpp`) — the table is a fixed 32 slots with no
+   proof-of-work or per-source rate limit on join. 32 forged distinct
+   endpoints fill it, after which legitimate joins are rejected (server
+   replies `Leave` on a full table, per Task 6). `expire()`'s 5 s timeout
+   reclaims slots, but an attacker can win the race to refill them
+   indefinitely for the cost of small forged UDP packets.
+
+**Why deferred rather than fixed:** a real fix requires a per-session secret
+(e.g., a token issued in `JoinAccept` and required on every subsequent
+packet) — address correlation alone cannot authorize against a
+source-spoofing attacker. That means reopening the wire format, which
+`CLAUDE.md`'s Global Constraint says happens "exactly once, in Task 3... If a
+later task discovers it needs a format change, that is a finding to record
+and raise, not a change to make quietly." No phase in the current P2–P6
+roadmap allocates scope for a session-authentication redesign, and the
+design doc's own stated threat model (an unauthenticated, address-spoofing-
+capable attacker) already assumes this class of gap exists — the project's
+deliverable is a netcode-techniques demo and a measured numbers table, not a
+hardened production service. Recorded here so **P3 does not silently
+re-litigate or re-discover this** — any future phase that changes the wire
+format again should treat a session-token scheme as a candidate addition,
+not a surprise.
+
+---
+
+<!-- Next section: ## P2 continued — Task 9/10 decisions -->

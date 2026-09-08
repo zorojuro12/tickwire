@@ -19,18 +19,26 @@ if(TW_SANITIZER)
   target_link_options(tickwire_sim_flags INTERFACE -fsanitize=${TW_SANITIZER})
 endif()
 
-add_library(libsim STATIC src/sim/sim.cpp)
+add_library(libsim STATIC src/sim/sim.cpp src/sim/world.cpp)
 target_include_directories(libsim PUBLIC src)
 target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 
-add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/loopback.cpp src/net/udp.cpp)
+add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
 target_link_libraries(libnet PUBLIC libsim)
+
+add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp)
+target_link_libraries(libserver PUBLIC libnet)
+
+add_library(libclient STATIC src/client/view.cpp)
+target_include_directories(libclient PUBLIC src)
+target_link_libraries(libclient PUBLIC libnet)
 
 enable_testing()
 
 function(tw_add_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE libnet GTest::gtest_main)
+  target_include_directories(${name} PRIVATE tests)
+  target_link_libraries(${name} PRIVATE libserver libclient GTest::gtest_main)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -38,12 +46,23 @@ add_executable(smoke_test tests/smoke_test.cpp)
 target_link_libraries(smoke_test PRIVATE libsim GTest::gtest_main)
 add_test(NAME smoke_test COMMAND smoke_test)
 
+add_executable(world_test tests/sim/world_test.cpp)
+target_link_libraries(world_test PRIVATE libsim GTest::gtest_main)
+add_test(NAME world_test COMMAND world_test)
+
 tw_add_test(bytes_test tests/net/bytes_test.cpp)
 tw_add_test(protocol_test tests/net/protocol_test.cpp)
 tw_add_test(loopback_test tests/net/loopback_test.cpp)
 tw_add_test(udp_test tests/net/udp_test.cpp)
 tw_add_test(simulated_test tests/net/simulated_test.cpp)
 tw_add_test(robustness_test tests/net/robustness_test.cpp)
+tw_add_test(framing_test tests/net/framing_test.cpp)
+tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
+tw_add_test(session_test tests/server/session_test.cpp)
+tw_add_test(server_test tests/server/server_test.cpp)
+tw_add_test(timer_test tests/server/timer_test.cpp)
+tw_add_test(client_test tests/client/client_test.cpp)
+tw_add_test(view_test tests/client/view_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
@@ -66,6 +85,21 @@ if(TW_SANITIZER MATCHES "thread")
   set_tests_properties(tsan_detects_race PROPERTIES
     PASS_REGULAR_EXPRESSION "data race")
 endif()
+
+add_executable(tw_server apps/tw_server.cpp)
+target_link_libraries(tw_server PRIVATE libserver)
+add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
+set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
+add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
+set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+
+add_executable(tw_loadclient apps/tw_loadclient.cpp)
+target_link_libraries(tw_loadclient PRIVATE libclient libserver)
+
+add_test(NAME e2e_udp
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
+          "$<TARGET_FILE:tw_server>" "$<TARGET_FILE:tw_loadclient>")
+set_tests_properties(e2e_udp PROPERTIES PASS_REGULAR_EXPRESSION "joined=4")
 
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)

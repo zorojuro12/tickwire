@@ -10,7 +10,7 @@ namespace {
 
 constexpr std::array<std::byte, kHeaderBytes> kGoldenHeaderBytes = {
     std::byte{0x54}, std::byte{0x57}, std::byte{0x49}, std::byte{0x52},
-    std::byte{0x01}, std::byte{0x01}, std::byte{0x04}, std::byte{0x00},
+    std::byte{0x02}, std::byte{0x01}, std::byte{0x04}, std::byte{0x00},
     std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
     std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
     std::byte{0xB0}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
@@ -19,7 +19,7 @@ constexpr std::array<std::byte, kHeaderBytes> kGoldenHeaderBytes = {
 PacketHeader goldenHeader() {
   PacketHeader h;
   h.magic = kProtocolMagic;
-  h.version = 1;
+  h.version = kProtocolVersion;
   h.type = MsgType::kInput;
   h.payload_len = 4;
   h.tick = 1234;
@@ -79,7 +79,7 @@ TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
 
   const std::array<std::array<std::byte, kHeaderBytes>, 5> cases = {
       mutated(0, 0x55),  // wrong magic
-      mutated(4, 0x02),  // wrong version
+      mutated(4, 0x03),  // wrong version
       mutated(5, 0x00),  // MsgType::kInvalid
       mutated(5, 0x06),  // one past kMaxMsgType
       mutated(5, 0xFF),
@@ -160,8 +160,13 @@ TEST(ProtocolHeaderTest, RejectsPayloadLenThatDisagreesWithThePacket) {
 }
 
 TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
-  const sim::InputCommand in{
-      .player_id = 3, .tick = 1234, .move_x = 1.0f, .move_y = -0.5f, .fire = true};
+  const sim::InputCommand in{.player_id = 3,
+                              .tick = 1234,
+                              .move_x = 1.0f,
+                              .move_y = -0.5f,
+                              .aim_x = 0.0f,
+                              .aim_y = 1.0f,
+                              .fire = true};
 
   std::array<std::byte, kInputBytes> buf{};
   ByteWriter w(buf);
@@ -173,6 +178,8 @@ TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
       std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x01}};
   EXPECT_EQ(buf, expected);
 
@@ -181,14 +188,15 @@ TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
   ASSERT_TRUE(decodeInput(r, out));
   EXPECT_EQ(out.player_id, in.player_id);
   EXPECT_EQ(out.tick, in.tick);
-  uint32_t move_x_bits = 0, expected_move_x_bits = 0;
-  std::memcpy(&move_x_bits, &out.move_x, sizeof(move_x_bits));
-  std::memcpy(&expected_move_x_bits, &in.move_x, sizeof(expected_move_x_bits));
-  EXPECT_EQ(move_x_bits, expected_move_x_bits);
-  uint32_t move_y_bits = 0, expected_move_y_bits = 0;
-  std::memcpy(&move_y_bits, &out.move_y, sizeof(move_y_bits));
-  std::memcpy(&expected_move_y_bits, &in.move_y, sizeof(expected_move_y_bits));
-  EXPECT_EQ(move_y_bits, expected_move_y_bits);
+  auto bitsOf = [](float f) {
+    uint32_t b = 0;
+    std::memcpy(&b, &f, sizeof(b));
+    return b;
+  };
+  EXPECT_EQ(bitsOf(out.move_x), bitsOf(in.move_x));
+  EXPECT_EQ(bitsOf(out.move_y), bitsOf(in.move_y));
+  EXPECT_EQ(bitsOf(out.aim_x), bitsOf(in.aim_x));
+  EXPECT_EQ(bitsOf(out.aim_y), bitsOf(in.aim_y));
   EXPECT_EQ(out.fire, in.fire);
 }
 
@@ -198,6 +206,8 @@ TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
       std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x00}};
 
   {
@@ -207,7 +217,7 @@ TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
     EXPECT_FALSE(out.fire);
   }
 
-  buf[16] = std::byte{0x7F};
+  buf[24] = std::byte{0x7F};
   {
     ByteReader r(buf);
     sim::InputCommand out{};
@@ -222,6 +232,8 @@ TEST(InputCommandCodecTest, RejectsFramingMismatch) {
       std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
       std::byte{0x01}};
 
   for (size_t prefix = 0; prefix < kInputBytes; ++prefix) {
@@ -412,29 +424,39 @@ TEST(WorldSnapshotCodecTest, RejectsPayloadThatOutrunsItsCount) {
 }
 
 TEST(InputCommandCodecTest, RejectsNonFiniteFloats) {
-  auto withMoveXBytes = [](std::array<std::byte, 4> bits) {
+  auto withFloatAt = [](size_t offset, std::array<std::byte, 4> bits) {
     std::array<std::byte, kInputBytes> bytes = {
         std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
         std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
-        bits[0],         bits[1],         bits[2],         bits[3],
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
         std::byte{0x01}};
+    bytes[offset + 0] = bits[0];
+    bytes[offset + 1] = bits[1];
+    bytes[offset + 2] = bits[2];
+    bytes[offset + 3] = bits[3];
     return bytes;
   };
 
   // Quiet NaN: 00 00 C0 7F (little-endian bytes of 0x7FC00000).
-  const auto nan_bytes =
-      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0xC0}, std::byte{0x7F}});
+  const std::array<std::byte, 4> nan_bits = {std::byte{0x00}, std::byte{0x00},
+                                              std::byte{0xC0}, std::byte{0x7F}};
   // +Infinity: 00 00 80 7F (little-endian bytes of 0x7F800000).
-  const auto inf_bytes =
-      withMoveXBytes({std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x7F}});
+  const std::array<std::byte, 4> inf_bits = {std::byte{0x00}, std::byte{0x00},
+                                              std::byte{0x80}, std::byte{0x7F}};
 
-  for (const auto& bytes : {nan_bytes, inf_bytes}) {
-    ByteReader r(bytes);
-    sim::InputCommand out{};
-    out.player_id = 0xAAAAAAAAu;
-    EXPECT_FALSE(decodeInput(r, out));
-    EXPECT_EQ(out.player_id, 0xAAAAAAAAu);
+  // Offsets: move_x=8, move_y=12, aim_x=16, aim_y=20.
+  for (size_t offset : {8u, 12u, 16u, 20u}) {
+    for (const auto& bits : {nan_bits, inf_bits}) {
+      const auto bytes = withFloatAt(offset, bits);
+      ByteReader r(bytes);
+      sim::InputCommand out{};
+      out.player_id = 0xAAAAAAAAu;
+      EXPECT_FALSE(decodeInput(r, out)) << "offset " << offset;
+      EXPECT_EQ(out.player_id, 0xAAAAAAAAu) << "offset " << offset;
+    }
   }
 }
 
