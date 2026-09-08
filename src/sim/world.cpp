@@ -42,6 +42,35 @@ bool World::hasPlayer(uint32_t id) const noexcept { return findSlot(id) >= 0; }
 
 uint32_t World::playerCount() const noexcept { return count_; }
 
+void World::applyInput(const InputCommand& in) {
+  int slot = findSlot(in.player_id);
+  if (slot < 0) return;
+  uint32_t i = static_cast<uint32_t>(slot);
+  latched_[i] = in;
+
+  float len2 = in.move_x * in.move_x + in.move_y * in.move_y;
+  if (!std::isfinite(len2) || len2 == 0.0f) {
+    players_[i].vx = 0.0f;
+    players_[i].vy = 0.0f;
+  } else if (len2 > 1.0f) {
+    float scale = kMoveSpeed / std::sqrt(len2);
+    players_[i].vx = in.move_x * scale;
+    players_[i].vy = in.move_y * scale;
+  } else {
+    players_[i].vx = in.move_x * kMoveSpeed;
+    players_[i].vy = in.move_y * kMoveSpeed;
+  }
+}
+
+void World::step() {
+  for (uint32_t i = 0; i < kMaxPlayers; ++i) {
+    if (!occupied_[i]) continue;
+    players_[i].x = players_[i].x + players_[i].vx * kTickDt;
+    players_[i].y = players_[i].y + players_[i].vy * kTickDt;
+  }
+  ++tick_;
+}
+
 void World::writeSnapshot(WorldSnapshot& out) const {
   out.tick = tick_;
   out.count = count_;

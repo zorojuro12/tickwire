@@ -27,6 +27,7 @@ struct InputCommand {
   uint32_t player_id;
   uint32_t tick;
   float move_x, move_y;
+  float aim_x, aim_y;
   bool fire;
 };
 

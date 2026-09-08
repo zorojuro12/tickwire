@@ -14,6 +14,8 @@ class World {
   bool removePlayer(uint32_t id);  // false if absent
   bool hasPlayer(uint32_t id) const noexcept;
   uint32_t playerCount() const noexcept;
+  void applyInput(const InputCommand& in);  // silently ignores an unknown player_id
+  void step();                              // advances exactly kTickDt
   void writeSnapshot(WorldSnapshot& out) const;  // caller-owned buffer
   uint32_t tick() const noexcept;
 
