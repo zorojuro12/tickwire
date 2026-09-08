@@ -14,7 +14,8 @@ namespace {
 
 std::vector<std::byte> buildInputPacket() {
   const sim::InputCommand in{
-      .player_id = 3, .tick = 1234, .move_x = 1.0f, .move_y = -0.5f, .fire = true};
+      .player_id = 3, .tick = 1234,   .move_x = 1.0f, .move_y = -0.5f,
+      .aim_x = 0.0f,  .aim_y = 0.0f,  .fire = true};
   std::vector<std::byte> buf(kHeaderBytes + kInputBytes);
   ByteWriter w(buf);
   PacketHeader h;
