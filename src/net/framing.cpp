@@ -19,4 +19,17 @@ bool decodeJoinAccept(ByteReader& r, uint32_t& out) {
   return true;
 }
 
+size_t framePacket(PacketHeader h, std::span<const std::byte> payload,
+                    std::span<std::byte> out) {
+  if (payload.size() > kMaxPacket - kHeaderBytes) return 0;
+  if (out.size() < kHeaderBytes + payload.size()) return 0;
+
+  h.payload_len = static_cast<uint16_t>(payload.size());
+  ByteWriter w(out);
+  if (!encodeHeader(h, w)) return 0;
+  w.bytes(payload);
+  if (!w.ok()) return 0;
+  return w.size();
+}
+
 }  // namespace net
