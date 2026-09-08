@@ -93,6 +93,48 @@ TEST(ByteReaderTest, RoundTripsByteWriterOutput) {
   EXPECT_TRUE(r.ok());
 }
 
+TEST(ByteWriterTest, BytesAppendsVerbatimAndRespectsTheStickyBound) {
+  {
+    std::array<std::byte, 8> buf{};
+    ByteWriter w(buf);
+    w.u8(0xAA);
+    const std::array<std::byte, 3> payload{std::byte{0x01}, std::byte{0x02},
+                                            std::byte{0x03}};
+    w.bytes(payload);
+    EXPECT_EQ(w.size(), 4u);
+    EXPECT_TRUE(w.ok());
+    EXPECT_EQ(buf[0], std::byte{0xAA});
+    EXPECT_EQ(buf[1], std::byte{0x01});
+    EXPECT_EQ(buf[2], std::byte{0x02});
+    EXPECT_EQ(buf[3], std::byte{0x03});
+  }
+  {
+    std::array<std::byte, 4> buf{};
+    ByteWriter w(buf);
+    w.u8(0x11);
+    EXPECT_EQ(w.size(), 1u);
+    w.bytes({});
+    EXPECT_EQ(w.size(), 1u);
+    EXPECT_TRUE(w.ok());
+  }
+  {
+    std::array<std::byte, 3> buf{};
+    buf[2] = std::byte{0xEE};
+    ByteWriter w(buf);
+    w.u16(0x1234);
+    ASSERT_EQ(w.size(), 2u);
+    const std::array<std::byte, 2> payload{std::byte{0x01}, std::byte{0x02}};
+    w.bytes(payload);
+    EXPECT_EQ(w.size(), 2u);
+    EXPECT_FALSE(w.ok());
+    EXPECT_EQ(buf[2], std::byte{0xEE});
+
+    w.u8(0x7F);
+    EXPECT_EQ(w.size(), 2u);
+    EXPECT_FALSE(w.ok());
+  }
+}
+
 TEST(ByteReaderTest, OverreadIsStickyAndHidesTheRest) {
   const std::array<std::byte, 5> buf{std::byte{0x01}, std::byte{0x02},
                                       std::byte{0x03}, std::byte{0x04},

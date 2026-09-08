@@ -17,6 +17,7 @@ class ByteWriter {
   void u16(uint16_t v) noexcept;
   void u32(uint32_t v) noexcept;
   void f32(float v) noexcept;
+  void bytes(std::span<const std::byte> src) noexcept;  // appends verbatim
 
   bool ok() const noexcept;
   size_t size() const noexcept;

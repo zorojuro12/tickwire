@@ -37,6 +37,14 @@ void ByteWriter::f32(float v) noexcept {
   u32(bits);
 }
 
+void ByteWriter::bytes(std::span<const std::byte> src) noexcept {
+  if (!ok_) return;
+  if (src.empty()) return;
+  if (cursor_ + src.size() > buf_.size()) { ok_ = false; return; }
+  std::memcpy(buf_.data() + cursor_, src.data(), src.size());
+  cursor_ += src.size();
+}
+
 bool ByteWriter::ok() const noexcept { return ok_; }
 size_t ByteWriter::size() const noexcept { return cursor_; }
 
