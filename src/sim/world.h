@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include "sim/sim.h"
 
@@ -18,6 +19,11 @@ class World {
   void step();                              // advances exactly kTickDt
   void writeSnapshot(WorldSnapshot& out) const;  // caller-owned buffer
   uint32_t tick() const noexcept;
+
+  // Nearest player (excluding the shooter) whose circle the ray from the
+  // shooter's position along (aim_x, aim_y) intersects. std::nullopt when
+  // nothing is hit.
+  std::optional<uint32_t> resolveHitscan(uint32_t shooter, float aim_x, float aim_y) const;
 
  private:
   int findSlot(uint32_t id) const noexcept;  // -1 if not present

@@ -90,4 +90,36 @@ void World::writeSnapshot(WorldSnapshot& out) const {
 
 uint32_t World::tick() const noexcept { return tick_; }
 
+std::optional<uint32_t> World::resolveHitscan(uint32_t shooter, float aim_x,
+                                               float aim_y) const {
+  int shooter_slot = findSlot(shooter);
+  if (shooter_slot < 0) return std::nullopt;
+
+  float aim_len2 = aim_x * aim_x + aim_y * aim_y;
+  if (!std::isfinite(aim_len2) || aim_len2 == 0.0f) return std::nullopt;
+  float inv_len = 1.0f / std::sqrt(aim_len2);
+  float dx = aim_x * inv_len;
+  float dy = aim_y * inv_len;
+
+  const PlayerState& origin = players_[static_cast<uint32_t>(shooter_slot)];
+  std::optional<uint32_t> best_id;
+  float best_t = 0.0f;
+
+  for (uint32_t i = 0; i < kMaxPlayers; ++i) {
+    if (!occupied_[i]) continue;
+    if (players_[i].id == shooter) continue;
+    float mx = players_[i].x - origin.x;
+    float my = players_[i].y - origin.y;
+    float t = mx * dx + my * dy;
+    if (t < 0.0f) continue;
+    float perp2 = mx * mx + my * my - t * t;
+    if (perp2 > kPlayerRadius * kPlayerRadius) continue;
+    if (!best_id.has_value() || t < best_t) {
+      best_id = players_[i].id;
+      best_t = t;
+    }
+  }
+  return best_id;
+}
+
 }  // namespace sim

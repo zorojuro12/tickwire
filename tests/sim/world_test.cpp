@@ -308,5 +308,100 @@ TEST(WorldTest, PlayersAreClampedInsideTheArenaOnEveryWall) {
   }
 }
 
+TEST(WorldTest, HitscanReturnsNearestTargetAlongTheRay) {
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(3, 20.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 2u);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(3, 20.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 2u);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(3, 20.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, -1.0f, 0.0f), std::nullopt);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 1.0f), std::nullopt);
+  }
+  {
+    // Grazing is a hit; just past the radius is not.
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.4f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 2u);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.6f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), std::nullopt);
+  }
+  {
+    // Aim need not be normalized.
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 7.5f, 0.0f), 2u);
+  }
+  {
+    // The shooter never hits itself.
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, 10.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 2u);
+    ASSERT_TRUE(w->removePlayer(2));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), std::nullopt);
+  }
+  {
+    // Degenerate inputs return nullopt and must not crash.
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 0.0f, 0.0f), std::nullopt);
+    EXPECT_EQ(w->resolveHitscan(1, std::numeric_limits<float>::quiet_NaN(), 0.0f),
+              std::nullopt);
+    EXPECT_EQ(w->resolveHitscan(1, std::numeric_limits<float>::infinity(), 0.0f),
+              std::nullopt);
+    EXPECT_EQ(w->resolveHitscan(99, 1.0f, 0.0f), std::nullopt);
+    EXPECT_EQ(w->resolveHitscan(0, 1.0f, 0.0f), std::nullopt);
+  }
+  {
+    // A target behind the shooter is never hit, even when overlapping.
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(2, -0.1f, 0.0f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), std::nullopt);
+  }
+}
+
+TEST(WorldTest, HitscanDistanceTiesResolveToTheLowerPlayerId) {
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(7, 10.0f, 0.3f));
+    ASSERT_TRUE(w->addPlayer(3, 10.0f, -0.3f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 3u);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+    ASSERT_TRUE(w->addPlayer(3, 10.0f, -0.3f));
+    ASSERT_TRUE(w->addPlayer(7, 10.0f, 0.3f));
+    EXPECT_EQ(w->resolveHitscan(1, 1.0f, 0.0f), 3u);
+  }
+}
+
 }  // namespace
 }  // namespace sim
