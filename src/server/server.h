@@ -47,6 +47,8 @@ class Server {
       ring_.commitRead();
     }
     world_.step();
+
+    if (world_.tick() % kSnapshotIntervalTicks == 0) broadcastSnapshot(now_ms);
   }
 
   size_t queuedPackets() const noexcept { return ring_.size(); }
@@ -152,6 +154,25 @@ class Server {
     sendFramed(to, out_h, {});
   }
 
+  void broadcastSnapshot(uint32_t now_ms) noexcept {
+    world_.writeSnapshot(snapshot_);
+    net::ByteWriter pw(snapshot_payload_);
+    if (!net::encodeSnapshot(snapshot_, pw)) {
+      ++dropped_;
+      return;
+    }
+    const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
+
+    for (size_t i = 0; i < sessions_.count(); ++i) {
+      net::PacketHeader out_h;
+      out_h.type = net::MsgType::kSnapshot;
+      out_h.tick = world_.tick();
+      out_h.send_time_ms = now_ms;
+      out_h.ack_tick = sessions_.lastInputTick(sessions_.playerAt(i));
+      sendFramed(sessions_.endpointAt(i), out_h, payload);
+    }
+  }
+
   void sendFramed(const net::Endpoint& to, net::PacketHeader h,
                    std::span<const std::byte> payload) noexcept {
     const size_t written = net::framePacket(h, payload, send_buf_);
@@ -171,6 +192,8 @@ class Server {
   SessionTable sessions_;
   PacketRing<net::PacketSlot, kIngestCapacity> ring_;
   std::array<std::byte, net::kMaxPacket> send_buf_{};
+  sim::WorldSnapshot snapshot_{};
+  std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;

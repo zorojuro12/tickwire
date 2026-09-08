@@ -411,5 +411,84 @@ TEST(ServerTest, FiringHitsTheNearestPlayerAlongTheAimAndIsRateLimited) {
   EXPECT_EQ(srv->hits(1), 1u);
 }
 
+TEST(ServerTest, SnapshotsGoOutAt20HzToEveryLiveSession) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2020u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2021u};
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  tp->clearSent();
+
+  // An accepted input with tick=77 from epA; ack_tick reaches the next
+  // snapshot sent to epA.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 77);
+  srv->ingest();
+  srv->tick(16);
+  // Reordered: an accepted input with an older tick must not walk ack_tick
+  // backwards.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 70);
+  srv->ingest();
+
+  size_t snapshot_count = 0;
+  for (int i = 0; i < 11; ++i) {
+    const size_t before = tp->sentCount();
+    srv->tick(32 + i * 16);
+    const size_t sent_this_tick = tp->sentCount() - before;
+    if (srv->worldTick() % kSnapshotIntervalTicks == 0) {
+      EXPECT_EQ(sent_this_tick, 2u) << "worldTick " << srv->worldTick();
+    } else {
+      EXPECT_EQ(sent_this_tick, 0u) << "worldTick " << srv->worldTick();
+    }
+    snapshot_count += sent_this_tick;
+  }
+  // 12 total tick() calls after clearSent (the one above plus these 11);
+  // worldTick runs 1 -> 13 across them, crossing a multiple of
+  // kSnapshotIntervalTicks (3, 6, 9, 12) exactly 4 times: 2 * (12 / 3) == 8.
+  EXPECT_EQ(snapshot_count, 8u);
+
+  ASSERT_GT(tp->sentCount(), 0u);
+  bool found_a = false, found_b = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.type, net::MsgType::kSnapshot);
+    EXPECT_EQ(h.version, net::kProtocolVersion);
+    EXPECT_EQ(h.payload_len, 8u + 2u * net::kPlayerStateBytes);
+    EXPECT_EQ(h.seq, 0u);
+
+    sim::WorldSnapshot snap{};
+    ASSERT_TRUE(net::decodeSnapshot(r, snap));
+    EXPECT_EQ(snap.count, 2u);
+    EXPECT_EQ(h.tick, snap.tick);
+
+    if (s.to == kEpA) {
+      EXPECT_EQ(h.ack_tick, 77u);
+      found_a = true;
+    } else if (s.to == kEpB) {
+      EXPECT_EQ(h.ack_tick, 0u);
+      found_b = true;
+    }
+  }
+  EXPECT_TRUE(found_a);
+  EXPECT_TRUE(found_b);
+}
+
+TEST(ServerTest, NoSessionsMeansNoSnapshotButTheWorldStillTicks) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  srv->tick(0);
+  srv->tick(16);
+  srv->tick(32);
+  EXPECT_EQ(tp->sentCount(), 0u);
+  EXPECT_EQ(srv->worldTick(), 3u);
+}
+
 }  // namespace
 }  // namespace server
