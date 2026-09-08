@@ -26,7 +26,7 @@ target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
 target_link_libraries(libnet PUBLIC libsim)
 
-add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp)
+add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp)
 target_link_libraries(libserver PUBLIC libnet)
 
 enable_testing()
