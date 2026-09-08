@@ -24,7 +24,14 @@ class SessionTable {
   bool endpointFor(uint32_t player_id, net::Endpoint& out) const noexcept;
   // True only when `from` holds a live session whose assigned id is player_id.
   bool authorize(const net::Endpoint& from, uint32_t player_id) const noexcept;
+  void touch(const net::Endpoint& from, uint32_t now_tick, uint32_t input_tick) noexcept;
+  uint32_t lastInputTick(uint32_t player_id) const noexcept;
+  bool tryFire(uint32_t player_id, uint32_t now_tick) noexcept;  // false while cooling down
   bool remove(const net::Endpoint& from) noexcept;
+  // Removes every session silent for >= kSessionTimeoutTicks; writes the
+  // removed ids into `out` and returns how many. `out` must hold kMaxExpired
+  // entries.
+  size_t expire(uint32_t now_tick, std::span<uint32_t> out) noexcept;
   uint32_t count() const noexcept;
   // Iteration for broadcast: the i-th live session, i < count().
   net::Endpoint endpointAt(size_t i) const noexcept;
@@ -37,6 +44,7 @@ class SessionTable {
     uint32_t last_seen_tick = 0;
     uint32_t last_input_tick = 0;
     uint32_t last_fire_tick = 0;
+    bool ever_fired = false;
     bool live = false;
   };
 

@@ -123,5 +123,72 @@ TEST(SessionTableTest, AuthorizationRejectsAMismatchedOrUnknownEndpoint) {
   EXPECT_FALSE(table.authorize(different_port, a));
 }
 
+TEST(SessionTableTest, SilentSessionsExpire) {
+  SessionTable table;
+  std::array<uint32_t, kMaxExpired> out{};
+
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+  const uint32_t b = table.joinOrGet(ep(1), 100);
+  (void)b;
+
+  EXPECT_EQ(table.expire(100, out), 0u);
+  EXPECT_EQ(table.count(), 2u);
+
+  table.touch(ep(0), 250, 7);
+  EXPECT_EQ(table.expire(300, out), 0u);
+
+  EXPECT_EQ(table.expire(400, out), 1u);
+  EXPECT_EQ(out[0], b);
+  EXPECT_EQ(table.count(), 1u);
+  EXPECT_EQ(table.playerFor(ep(1)), 0u);
+  EXPECT_EQ(table.playerFor(ep(0)), a);
+
+  EXPECT_EQ(table.expire(600, out), 1u);
+  EXPECT_EQ(out[0], a);
+  EXPECT_EQ(table.count(), 0u);
+}
+
+TEST(SessionTableTest, ExpiryTimeoutIsInclusiveAtTheBoundary) {
+  SessionTable table;
+  std::array<uint32_t, kMaxExpired> out{};
+  table.joinOrGet(ep(0), 0);
+
+  EXPECT_EQ(table.expire(299, out), 0u);
+  EXPECT_EQ(table.expire(300, out), 1u);
+}
+
+TEST(SessionTableTest, TouchTracksTheHighestInputTickAndIgnoresUnknownEndpoints) {
+  SessionTable table;
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+
+  table.touch(ep(0), 10, 42);
+  EXPECT_EQ(table.lastInputTick(a), 42u);
+
+  // Reordered UDP must not walk the ack backwards.
+  table.touch(ep(0), 11, 40);
+  EXPECT_EQ(table.lastInputTick(a), 42u);
+
+  EXPECT_EQ(table.lastInputTick(99), 0u);
+
+  // touch on an endpoint with no session is a no-op and must not crash.
+  table.touch(ep(5), 20, 1);
+}
+
+TEST(SessionTableTest, FiringIsRateLimitedPerPlayer) {
+  SessionTable table;
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+
+  EXPECT_TRUE(table.tryFire(a, 0));
+  EXPECT_FALSE(table.tryFire(a, 1));
+  EXPECT_FALSE(table.tryFire(a, 11));
+  EXPECT_TRUE(table.tryFire(a, 12));
+
+  EXPECT_FALSE(table.tryFire(0, 100));
+  EXPECT_FALSE(table.tryFire(99, 100));
+
+  const uint32_t b = table.joinOrGet(ep(1), 0);
+  EXPECT_TRUE(table.tryFire(b, 0));
+}
+
 }  // namespace
 }  // namespace server

@@ -59,11 +59,54 @@ bool SessionTable::authorize(const net::Endpoint& from, uint32_t player_id) cons
   return player_id != sim::kInvalidPlayerId && playerFor(from) == player_id;
 }
 
+void SessionTable::touch(const net::Endpoint& from, uint32_t now_tick,
+                          uint32_t input_tick) noexcept {
+  int slot = findByEndpoint(from);
+  if (slot < 0) return;
+  Entry& e = entries_[static_cast<uint32_t>(slot)];
+  e.last_seen_tick = now_tick;
+  if (input_tick > e.last_input_tick) e.last_input_tick = input_tick;
+}
+
+uint32_t SessionTable::lastInputTick(uint32_t player_id) const noexcept {
+  int slot = findByPlayer(player_id);
+  if (slot < 0) return 0;
+  return entries_[static_cast<uint32_t>(slot)].last_input_tick;
+}
+
+bool SessionTable::tryFire(uint32_t player_id, uint32_t now_tick) noexcept {
+  int slot = findByPlayer(player_id);
+  if (slot < 0) return false;
+  Entry& e = entries_[static_cast<uint32_t>(slot)];
+  if (e.ever_fired && now_tick - e.last_fire_tick < kFireCooldownTicks) return false;
+  e.last_fire_tick = now_tick;
+  e.ever_fired = true;
+  return true;
+}
+
 bool SessionTable::remove(const net::Endpoint& from) noexcept {
   int slot = findByEndpoint(from);
   if (slot < 0) return false;
   removeAt(static_cast<size_t>(slot));
   return true;
+}
+
+size_t SessionTable::expire(uint32_t now_tick, std::span<uint32_t> out) noexcept {
+  size_t written = 0;
+  for (uint32_t i = 0; i < count_;) {
+    uint32_t elapsed = now_tick >= entries_[i].last_seen_tick
+                            ? now_tick - entries_[i].last_seen_tick
+                            : 0;
+    if (elapsed >= kSessionTimeoutTicks) {
+      if (written < out.size()) out[written] = entries_[i].player_id;
+      ++written;
+      removeAt(i);
+      // removeAt swapped the last live entry into slot i; re-check it.
+    } else {
+      ++i;
+    }
+  }
+  return written;
 }
 
 void SessionTable::removeAt(size_t slot) noexcept {
