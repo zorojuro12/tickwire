@@ -114,7 +114,8 @@ std::optional<uint32_t> World::resolveHitscan(uint32_t shooter, float aim_x,
     if (t < 0.0f) continue;
     float perp2 = mx * mx + my * my - t * t;
     if (perp2 > kPlayerRadius * kPlayerRadius) continue;
-    if (!best_id.has_value() || t < best_t) {
+    if (!best_id.has_value() || t < best_t ||
+        (t == best_t && players_[i].id < *best_id)) {
       best_id = players_[i].id;
       best_t = t;
     }
