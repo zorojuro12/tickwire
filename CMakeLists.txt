@@ -111,3 +111,21 @@ add_test(NAME determinism_two_binaries
   COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/determinism-test.sh"
           "$<TARGET_FILE:digest_dump_a>" "$<TARGET_FILE:digest_dump_b>"
           "${CMAKE_SOURCE_DIR}/scripts/compare-digests.sh")
+
+option(TW_BUILD_GUI "Build the raylib client" OFF)
+if(TW_BUILD_GUI)
+  FetchContent_Declare(raylib
+    GIT_REPOSITORY https://github.com/raysan5/raylib.git
+    GIT_TAG 4.5.0)
+  set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(raylib)
+
+  # raylib's own warnings must not fail our build: -Wall -Wextra -Werror
+  # come from tickwire_sim_flags, which raylib does not link, so applying
+  # them only to our targets (not globally) keeps raylib's build silent.
+  add_executable(tw_client apps/tw_client.cpp)
+  target_link_libraries(tw_client PRIVATE libclient raylib)
+  add_test(NAME client_selftest COMMAND tw_client --selftest)
+  set_tests_properties(client_selftest PROPERTIES SKIP_RETURN_CODE 77)
+endif()
