@@ -29,9 +29,9 @@ target_link_libraries(libnet PUBLIC libsim)
 add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp)
 target_link_libraries(libserver PUBLIC libnet)
 
-add_library(libclient INTERFACE)
-target_include_directories(libclient INTERFACE src)
-target_link_libraries(libclient INTERFACE libnet)
+add_library(libclient STATIC src/client/view.cpp)
+target_include_directories(libclient PUBLIC src)
+target_link_libraries(libclient PUBLIC libnet)
 
 enable_testing()
 
@@ -62,6 +62,7 @@ tw_add_test(session_test tests/server/session_test.cpp)
 tw_add_test(server_test tests/server/server_test.cpp)
 tw_add_test(timer_test tests/server/timer_test.cpp)
 tw_add_test(client_test tests/client/client_test.cpp)
+tw_add_test(view_test tests/client/view_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
