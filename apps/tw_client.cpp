@@ -1,10 +1,26 @@
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <raylib.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <string>
 
+#include "client/client.h"
+#include "client/view.h"
+#include "net/simulated.h"
+#include "net/udp.h"
+#include "server/clock.h"
+#include "sim/sim.h"
+
 namespace {
+
+constexpr float kSide = 800.0f;
+constexpr uint32_t kLatencyStepMs = 25;
+constexpr uint32_t kMaxLatencyMs = 500;
 
 void printUsage() {
   std::fprintf(stderr,
@@ -21,6 +37,110 @@ int runSelftest() {
   ClearBackground(BLACK);
   DrawRectangleLines(0, 0, 800, 800, RAYWHITE);
   EndDrawing();
+  CloseWindow();
+  return 0;
+}
+
+int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_ms) {
+  in_addr addr{};
+  if (inet_pton(AF_INET, host.c_str(), &addr) != 1) {
+    std::fprintf(stderr, "tw_client: bad --host %s\n", host.c_str());
+    return 1;
+  }
+  const net::Endpoint server_ep{addr.s_addr, htons(port)};
+
+  auto udp = std::make_unique<net::UdpTransport>();
+  if (!udp->bind(htonl(INADDR_LOOPBACK), 0)) {
+    std::fprintf(stderr, "tw_client: failed to bind a client socket\n");
+    return 1;
+  }
+
+  net::SimConfig cfg;
+  cfg.latency_ms = std::min(initial_latency_ms, kMaxLatencyMs);
+  cfg.jitter_ms = 0;
+  cfg.loss_permille = 0;
+  cfg.seed = 1;
+
+  // Held in an optional so [ and ] can reconstruct the wrapper's config in
+  // place: emplace() destroys and reconstructs at the SAME storage address,
+  // so the Client<T>'s T& reference into it stays valid across the change.
+  std::optional<net::SimulatedTransport<net::UdpTransport>> wrapped;
+  wrapped.emplace(*udp, cfg);
+
+  auto client = std::make_unique<client::Client<net::SimulatedTransport<net::UdpTransport>>>(
+      *wrapped, server_ep);
+  client->beginJoin(server::monotonicMs());
+
+  InitWindow(800, 800, "tickwire");
+  SetTargetFPS(60);
+
+  uint32_t latency_ms = cfg.latency_ms;
+
+  while (!WindowShouldClose()) {
+    const uint32_t now_ms = server::monotonicMs();
+    client->tick(now_ms);
+    wrapped->advanceTick();
+
+    if (IsKeyPressed(KEY_LEFT_BRACKET)) {
+      latency_ms = latency_ms >= kLatencyStepMs ? latency_ms - kLatencyStepMs : 0;
+      cfg.latency_ms = latency_ms;
+      wrapped.emplace(*udp, cfg);
+    }
+    if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
+      latency_ms = std::min(latency_ms + kLatencyStepMs, kMaxLatencyMs);
+      cfg.latency_ms = latency_ms;
+      wrapped.emplace(*udp, cfg);
+    }
+
+    float move_x = 0.0f, move_y = 0.0f;
+    if (IsKeyDown(KEY_D)) move_x += 1.0f;
+    if (IsKeyDown(KEY_A)) move_x -= 1.0f;
+    if (IsKeyDown(KEY_W)) move_y += 1.0f;
+    if (IsKeyDown(KEY_S)) move_y -= 1.0f;
+
+    const sim::WorldSnapshot& snap = client->latestSnapshot();
+    float local_x = 0.0f, local_y = 0.0f;
+    bool have_local = false;
+    if (client->playerId() != sim::kInvalidPlayerId) {
+      for (uint32_t i = 0; i < snap.count; ++i) {
+        if (snap.players[i].id == client->playerId()) {
+          local_x = snap.players[i].x;
+          local_y = snap.players[i].y;
+          have_local = true;
+        }
+      }
+    }
+
+    const Vector2 mouse = GetMousePosition();
+    const float scale = kSide / (2.0f * sim::kArenaHalf);
+    const float world_mx = mouse.x / scale - sim::kArenaHalf;
+    const float world_my = sim::kArenaHalf - mouse.y / scale;
+
+    float aim_x = 0.0f, aim_y = 0.0f;
+    if (have_local) client::aimFromCursor(local_x, local_y, world_mx, world_my, aim_x, aim_y);
+
+    const bool fire = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    client->sendInput(now_ms, move_x, move_y, aim_x, aim_y, fire);
+
+    BeginDrawing();
+    ClearBackground(BLACK);
+    DrawRectangleLines(0, 0, static_cast<int>(kSide), static_cast<int>(kSide), RAYWHITE);
+
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      const client::ScreenPos sp =
+          client::worldToScreen(snap.players[i].x, snap.players[i].y, kSide, 0.0f, 0.0f);
+      const float r = client::worldToScreenRadius(snap.players[i].radius, kSide);
+      const Color color = (snap.players[i].id == client->playerId()) ? GREEN : RED;
+      DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, color);
+    }
+
+    DrawText(TextFormat("tick=%u latency=%ums players=%u", client->latestSnapshotTick(),
+                          latency_ms, snap.count),
+              10, 10, 20, RAYWHITE);
+    EndDrawing();
+  }
+
+  client->leave(server::monotonicMs());
   CloseWindow();
   return 0;
 }
@@ -58,10 +178,5 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // The full render/input/latency-slider loop is Checkpoint 3.
-  (void)host;
-  (void)port;
-  (void)latency_ms;
-  printUsage();
-  return 1;
+  return runClient(host, port, latency_ms);
 }

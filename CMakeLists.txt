@@ -125,7 +125,7 @@ if(TW_BUILD_GUI)
   # come from tickwire_sim_flags, which raylib does not link, so applying
   # them only to our targets (not globally) keeps raylib's build silent.
   add_executable(tw_client apps/tw_client.cpp)
-  target_link_libraries(tw_client PRIVATE libclient raylib)
+  target_link_libraries(tw_client PRIVATE libclient libserver raylib)
   add_test(NAME client_selftest COMMAND tw_client --selftest)
   set_tests_properties(client_selftest PROPERTIES SKIP_RETURN_CODE 77)
 endif()
