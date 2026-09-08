@@ -63,10 +63,15 @@ void World::applyInput(const InputCommand& in) {
 }
 
 void World::step() {
+  constexpr float kBound = kArenaHalf - kPlayerRadius;
   for (uint32_t i = 0; i < kMaxPlayers; ++i) {
     if (!occupied_[i]) continue;
     players_[i].x = players_[i].x + players_[i].vx * kTickDt;
     players_[i].y = players_[i].y + players_[i].vy * kTickDt;
+    if (players_[i].x > kBound) players_[i].x = kBound;
+    if (players_[i].x < -kBound) players_[i].x = -kBound;
+    if (players_[i].y > kBound) players_[i].y = kBound;
+    if (players_[i].y < -kBound) players_[i].y = -kBound;
   }
   ++tick_;
 }

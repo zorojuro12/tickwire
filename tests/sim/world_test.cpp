@@ -206,5 +206,107 @@ TEST(WorldTest, InputSetsVelocityStepIntegratesAndLatches) {
   EXPECT_EQ(empty->playerCount(), 0u);
 }
 
+TEST(WorldTest, PlayersAreClampedInsideTheArenaOnEveryWall) {
+  constexpr float kBound = kArenaHalf - kPlayerRadius;
+
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, kBound - 0.01f, 0.0f));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = 1.0f,
+                                .move_y = 0.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    for (int i = 0; i < 10; ++i) w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->x, kBound);
+    EXPECT_EQ(p->vx, kMoveSpeed);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, -(kBound - 0.01f), 0.0f));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = -1.0f,
+                                .move_y = 0.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    for (int i = 0; i < 10; ++i) w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->x, -kBound);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, kBound - 0.01f));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = 0.0f,
+                                .move_y = 1.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    for (int i = 0; i < 10; ++i) w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->y, kBound);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, 0.0f, -(kBound - 0.01f)));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = 0.0f,
+                                .move_y = -1.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    for (int i = 0; i < 10; ++i) w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->y, -kBound);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, kBound - 0.01f, kBound - 0.01f));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = 1.0f,
+                                .move_y = 1.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    for (int i = 0; i < 200; ++i) w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->x, kBound);
+    EXPECT_EQ(p->y, kBound);
+    for (int i = 0; i < 5; ++i) w->step();
+    p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->x, kBound);
+    EXPECT_EQ(p->y, kBound);
+  }
+  {
+    auto w = std::make_unique<World>();
+    ASSERT_TRUE(w->addPlayer(1, kBound, 0.0f));
+    w->applyInput(InputCommand{.player_id = 1,
+                                .tick = 0,
+                                .move_x = -1.0f,
+                                .move_y = 0.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false});
+    w->step();
+    auto p = snapshotFor(*w, 1);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_LT(p->x, kBound);
+  }
+}
+
 }  // namespace
 }  // namespace sim
