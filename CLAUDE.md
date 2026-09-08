@@ -15,10 +15,13 @@ changed or been discovered since.
 
 | Path | Contents |
 |---|---|
-| `src/sim/` | `libsim` — deterministic simulation core and POD payload types. No I/O, no wall-clock reads, no allocation. |
-| `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, and the `Transport` implementations (UDP, loopback, simulated). |
-| `scripts/` | `tw` (container invocation), `ci.sh`, toolchain/determinism verification scripts. |
-| `tests/` | GoogleTest suites, mirroring `src/` by subdirectory (`tests/net/`, ...). |
+| `src/sim/` | `libsim` — deterministic simulation core (`sim::World`) and POD payload types. No I/O, no wall-clock reads, no allocation. |
+| `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, framing (`net::framePacket`), and the `Transport` implementations (UDP, loopback, simulated). |
+| `src/server/` | `libserver` — `Server<T>`, `SessionTable` (endpoint↔player binding), `PacketRing` (I/O↔sim seam), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), and the monotonic clock. |
+| `src/client/` | `libclient` — `Client<T>` (join handshake, input send, snapshot store) and the pure world→screen view mapping used by the raylib renderer. |
+| `apps/` | Thin executables: `tw_server`, `tw_loadclient` (headless load client), `tw_client` (raylib demo client). Argument parsing, a clock, and a loop — no logic of their own. |
+| `scripts/` | `tw` (container invocation), `ci.sh`, `demo.sh`, `e2e-udp.sh`, toolchain/determinism verification scripts. |
+| `tests/` | GoogleTest suites, mirroring `src/` by subdirectory (`tests/net/`, `tests/server/`, `tests/client/`, ...); `tests/support/` holds fixtures shared across suites. |
 | `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness). |
 | `docs/` | Specs, phase plans, project history, and frozen format references (e.g. `wire-format.md`). |
 
@@ -33,7 +36,7 @@ plan execution, not assumed.
   and CMake 3.16 and cannot build this project (CMake 3.16 in particular is
   below the 3.21 floor — see below). All build/test commands go through
   `scripts/tw <command...>`, which runs `<command...>` inside the pinned
-  `tickwire-dev:gcc10-cmake3.28.4` image with the repo bind-mounted at
+  `tickwire-dev:gcc10-cmake3.28.4-x11` image with the repo bind-mounted at
   `/work`.
 - **CMake floor is 3.21+ (the image pins 3.28.4).** On Debian's packaged
   CMake 3.18, `ctest --test-dir` runs **zero tests and exits 0** — a silent
@@ -43,6 +46,16 @@ plan execution, not assumed.
   (`-DTW_SANITIZER=thread`). `scripts/ci.sh` runs all three plus the
   toolchain assertions in one call — it is what CI calls, so it is always
   reproducible locally.
+- **`-DTW_BUILD_GUI=ON` (default `OFF`) builds the raylib demo client**
+  (`build/gui`), fetching raylib via `FetchContent`. Left off `ci.sh`'s three
+  configurations deliberately — CI has no display and shouldn't pay for
+  raylib's build three times. `tw_client --selftest` proves the display path
+  works: exits `0` after opening and closing a real window when `DISPLAY` is
+  set, exits `77` (CTest `SKIP_RETURN_CODE`, not a failure) when it isn't.
+- **Changing the `Dockerfile` requires bumping the image tag in
+  `scripts/tw`.** `scripts/tw` skips the build when a matching tag already
+  exists locally, so editing the `Dockerfile` without bumping the tag
+  silently reuses the stale image and the change appears not to work.
 
 ## Container invocation
 
@@ -74,16 +87,26 @@ by hand.
 
 - **No `std::format`** — GCC 10 lacks it. Use fmtlib if formatting is needed.
 
-## Wire protocol (P1)
+## Wire protocol (frozen at P1, amended once at P2)
 
+- **The format is at version 2** (`kProtocolVersion = 2`) —
+  [`docs/wire-format.md`](docs/wire-format.md) is authoritative and current;
+  a version-1 header is rejected outright, no cross-version compatibility.
 - **Protocol fields are explicitly little-endian**, encoded/decoded byte by
   byte through `net::ByteWriter`/`net::ByteReader` — never `memcpy` a struct
   onto the wire, never `reinterpret_cast` a buffer to a struct. `_be`
   suffixes (`Endpoint::addr_be`, `Endpoint::port_be`) are reserved for values
   the *kernel* requires in network order; everything else is little-endian.
-  See [`docs/wire-format.md`](docs/wire-format.md).
 - **No `std::bit_cast`** — GCC 10's libstdc++ ships it only from GCC 11. Pun
   `float`↔`uint32_t` with `std::memcpy`, which is well-defined regardless.
+
+## No wall-clock reads in testable code
+
+`Server::tick(uint32_t now_ms)` and `Client::tick(uint32_t now_ms)` take the
+current monotonic millisecond as a **parameter**, never read it themselves.
+`server::monotonicMs()` (`src/server/clock.cpp`) is the only `clock_gettime`
+call in the project, and only `apps/` calls it. A test that needs time passes
+a number.
 
 ## `libsim` boundary
 
@@ -145,6 +168,6 @@ Full detail lives in [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md)
 
 - [`docs/specs/2026-09-04-tickwire-design.md`](docs/specs/2026-09-04-tickwire-design.md) — the design
 - [`docs/specs/2026-09-04-architecture-resolution.md`](docs/specs/2026-09-04-architecture-resolution.md) — authoritative for every architectural decision
-- [`docs/wire-format.md`](docs/wire-format.md) — the frozen P1 wire format
+- [`docs/wire-format.md`](docs/wire-format.md) — the wire format, frozen at P1 and amended once at P2 (version 2)
 - [`docs/project-history.md`](docs/project-history.md) — cross-phase decisions, pivots, and findings
 - [`docs/dev-workflow-guide.md`](docs/dev-workflow-guide.md) — full tool/skill/agent reference by situation
