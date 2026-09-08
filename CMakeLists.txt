@@ -26,11 +26,14 @@ target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
 target_link_libraries(libnet PUBLIC libsim)
 
+add_library(libserver STATIC src/server/session.cpp)
+target_link_libraries(libserver PUBLIC libnet)
+
 enable_testing()
 
 function(tw_add_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE libnet GTest::gtest_main)
+  target_link_libraries(${name} PRIVATE libserver GTest::gtest_main)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -50,6 +53,7 @@ tw_add_test(simulated_test tests/net/simulated_test.cpp)
 tw_add_test(robustness_test tests/net/robustness_test.cpp)
 tw_add_test(framing_test tests/net/framing_test.cpp)
 tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
+tw_add_test(session_test tests/server/session_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
