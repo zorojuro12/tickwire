@@ -52,5 +52,65 @@ TEST(PacketRingTest, CommittedWriteBecomesReadableInOrder) {
   }
 }
 
+TEST(PacketRingTest, RingIsBoundedAndIndicesWrapCorrectly) {
+  PacketRing<uint32_t, 4> ring;
+
+  for (uint32_t v : {1u, 2u, 3u, 4u}) {
+    uint32_t* s = ring.acquireWrite();
+    ASSERT_NE(s, nullptr) << "value " << v;
+    *s = v;
+    ring.commitWrite();
+  }
+  EXPECT_EQ(ring.size(), 4u);
+  EXPECT_EQ(ring.acquireWrite(), nullptr);
+  EXPECT_EQ(ring.size(), 4u);
+
+  for (uint32_t expected : {1u, 2u, 3u, 4u}) {
+    uint32_t* s = ring.acquireRead();
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(*s, expected);
+    ring.commitRead();
+  }
+
+  // Wrap: 100 further write/read cycles crossing the mask boundary many times.
+  for (uint32_t i = 0; i < 100; ++i) {
+    uint32_t value = 100 + i;
+    uint32_t* w = ring.acquireWrite();
+    ASSERT_NE(w, nullptr) << "cycle " << i;
+    *w = value;
+    ring.commitWrite();
+    uint32_t* r = ring.acquireRead();
+    ASSERT_NE(r, nullptr) << "cycle " << i;
+    EXPECT_EQ(*r, value) << "cycle " << i;
+    ring.commitRead();
+  }
+
+  // Interleaved: fill to 4, drain 2, write 2 more, then drain all 4.
+  for (uint32_t v : {1u, 2u, 3u, 4u}) {
+    uint32_t* s = ring.acquireWrite();
+    ASSERT_NE(s, nullptr) << "value " << v;
+    *s = v;
+    ring.commitWrite();
+  }
+  EXPECT_EQ(ring.size(), 4u);
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_NE(ring.acquireRead(), nullptr);
+    ring.commitRead();
+  }
+  for (uint32_t v : {5u, 6u}) {
+    uint32_t* s = ring.acquireWrite();
+    ASSERT_NE(s, nullptr) << "value " << v;
+    *s = v;
+    ring.commitWrite();
+  }
+  EXPECT_EQ(ring.size(), 4u);
+  for (uint32_t expected : {3u, 4u, 5u, 6u}) {
+    uint32_t* s = ring.acquireRead();
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(*s, expected);
+    ring.commitRead();
+  }
+}
+
 }  // namespace
 }  // namespace server
