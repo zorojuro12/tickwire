@@ -23,7 +23,7 @@ add_library(libsim STATIC src/sim/sim.cpp src/sim/world.cpp)
 target_include_directories(libsim PUBLIC src)
 target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 
-add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/loopback.cpp src/net/udp.cpp)
+add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
 target_link_libraries(libnet PUBLIC libsim)
 
 enable_testing()
@@ -48,6 +48,7 @@ tw_add_test(loopback_test tests/net/loopback_test.cpp)
 tw_add_test(udp_test tests/net/udp_test.cpp)
 tw_add_test(simulated_test tests/net/simulated_test.cpp)
 tw_add_test(robustness_test tests/net/robustness_test.cpp)
+tw_add_test(framing_test tests/net/framing_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
