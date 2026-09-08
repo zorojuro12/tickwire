@@ -2,11 +2,15 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 #include <gtest/gtest.h>
 
 #include "net/framing.h"
+#include "net/loopback.h"
 #include "net/protocol.h"
+#include "net/simulated.h"
+#include "server/server.h"
 #include "sim/sim.h"
 #include "support/recording_transport.h"
 
@@ -306,6 +310,115 @@ TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   }
   EXPECT_EQ(c.state(), State::kIdle);
   EXPECT_FALSE(c.sendInput(3016, 0.0f, 0.0f, 0.0f, 0.0f, false));
+}
+
+TEST(ClientTest, ClientAndServerConvergeInMemory) {
+  constexpr net::Endpoint kClientEp{0x7F000001u, 0x3010u};
+  constexpr net::Endpoint kServerLoopEp{0x7F000001u, 0x3011u};
+
+  auto client_tp = std::make_unique<net::LoopbackTransport>(kClientEp);
+  auto server_tp = std::make_unique<net::LoopbackTransport>(kServerLoopEp);
+  client_tp->connect(*server_tp);
+
+  auto srv = std::make_unique<server::Server<net::LoopbackTransport>>(*server_tp);
+  auto c = std::make_unique<Client<net::LoopbackTransport>>(*client_tp, kServerLoopEp);
+
+  uint32_t ms = 0;
+  auto pump = [&] {
+    srv->ingest();
+    srv->tick(ms);
+    c->tick(ms);
+    ms += 16;
+  };
+
+  c->beginJoin(ms);
+  ms += 16;
+  for (int i = 0; i < 5; ++i) pump();
+
+  EXPECT_EQ(c->state(), State::kJoined);
+  EXPECT_EQ(c->playerId(), 1u);
+  EXPECT_EQ(srv->world().playerCount(), 1u);
+
+  const float spawn_x = -35.0f;
+  for (int i = 0; i < 60; ++i) {
+    ASSERT_TRUE(c->sendInput(ms, 1.0f, 0.0f, 0.0f, 0.0f, false));
+    pump();
+  }
+
+  EXPECT_GE(c->snapshotsReceived(), 15u);
+  ASSERT_GT(c->latestSnapshot().count, 0u);
+  const sim::PlayerState* own = nullptr;
+  for (uint32_t i = 0; i < c->latestSnapshot().count; ++i) {
+    if (c->latestSnapshot().players[i].id == 1) own = &c->latestSnapshot().players[i];
+  }
+  ASSERT_NE(own, nullptr);
+  EXPECT_GE(own->x, spawn_x + 50.0f * sim::kMoveSpeed * sim::kTickDt);
+
+  c->leave(ms);
+  pump();
+  pump();
+  EXPECT_EQ(srv->world().playerCount(), 0u);
+}
+
+TEST(ClientTest, ClientAndServerConvergeThroughSimulatedLatency) {
+  constexpr net::Endpoint kClientEp{0x7F000001u, 0x3020u};
+  constexpr net::Endpoint kServerLoopEp{0x7F000001u, 0x3021u};
+
+  // Unwrapped baseline: how many pump iterations until kJoined.
+  auto baselineIterationsToJoin = [&] {
+    auto client_tp = std::make_unique<net::LoopbackTransport>(kClientEp);
+    auto server_tp = std::make_unique<net::LoopbackTransport>(kServerLoopEp);
+    client_tp->connect(*server_tp);
+    auto srv = std::make_unique<server::Server<net::LoopbackTransport>>(*server_tp);
+    auto c = std::make_unique<Client<net::LoopbackTransport>>(*client_tp, kServerLoopEp);
+
+    uint32_t ms = 0;
+    c->beginJoin(ms);
+    ms += 16;
+    for (int i = 0; i < 200; ++i) {
+      srv->ingest();
+      srv->tick(ms);
+      c->tick(ms);
+      ms += 16;
+      if (c->state() == State::kJoined) return i;
+    }
+    return -1;
+  }();
+  ASSERT_GE(baselineIterationsToJoin, 0);
+
+  auto client_tp = std::make_unique<net::LoopbackTransport>(kClientEp);
+  auto server_tp = std::make_unique<net::LoopbackTransport>(kServerLoopEp);
+  client_tp->connect(*server_tp);
+  auto srv = std::make_unique<server::Server<net::LoopbackTransport>>(*server_tp);
+
+  net::SimConfig cfg;
+  cfg.latency_ms = 100;
+  cfg.jitter_ms = 0;
+  cfg.loss_permille = 0;
+  cfg.seed = 1;
+  auto wrapped = std::make_unique<net::SimulatedTransport<net::LoopbackTransport>>(*client_tp, cfg);
+  auto c = std::make_unique<Client<net::SimulatedTransport<net::LoopbackTransport>>>(
+      *wrapped, kServerLoopEp);
+
+  uint32_t ms = 0;
+  c->beginJoin(ms);
+  ms += 16;
+  int delayed_iterations_to_join = -1;
+  for (int i = 0; i < 200; ++i) {
+    srv->ingest();
+    srv->tick(ms);
+    c->tick(ms);
+    wrapped->advanceTick();
+    ms += 16;
+    if (c->state() == State::kJoined) {
+      delayed_iterations_to_join = i;
+      break;
+    }
+  }
+
+  ASSERT_GE(delayed_iterations_to_join, 0);
+  EXPECT_GE(c->joinAttempts(), 1u);
+  EXPECT_GT(delayed_iterations_to_join, baselineIterationsToJoin);
 }
 
 }  // namespace

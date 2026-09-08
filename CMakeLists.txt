@@ -92,6 +92,14 @@ set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5
 add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
 set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
 
+add_executable(tw_loadclient apps/tw_loadclient.cpp)
+target_link_libraries(tw_loadclient PRIVATE libclient libserver)
+
+add_test(NAME e2e_udp
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
+          "$<TARGET_FILE:tw_server>" "$<TARGET_FILE:tw_loadclient>")
+set_tests_properties(e2e_udp PROPERTIES PASS_REGULAR_EXPRESSION "joined=4")
+
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)
 
