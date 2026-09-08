@@ -54,6 +54,7 @@ tw_add_test(robustness_test tests/net/robustness_test.cpp)
 tw_add_test(framing_test tests/net/framing_test.cpp)
 tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
 tw_add_test(session_test tests/server/session_test.cpp)
+tw_add_test(server_test tests/server/server_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
