@@ -29,11 +29,16 @@ target_link_libraries(libnet PUBLIC libsim)
 add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp)
 target_link_libraries(libserver PUBLIC libnet)
 
+add_library(libclient INTERFACE)
+target_include_directories(libclient INTERFACE src)
+target_link_libraries(libclient INTERFACE libnet)
+
 enable_testing()
 
 function(tw_add_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE libserver GTest::gtest_main)
+  target_include_directories(${name} PRIVATE tests)
+  target_link_libraries(${name} PRIVATE libserver libclient GTest::gtest_main)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -56,6 +61,7 @@ tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
 tw_add_test(session_test tests/server/session_test.cpp)
 tw_add_test(server_test tests/server/server_test.cpp)
 tw_add_test(timer_test tests/server/timer_test.cpp)
+tw_add_test(client_test tests/client/client_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
