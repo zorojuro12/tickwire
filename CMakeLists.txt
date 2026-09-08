@@ -79,6 +79,13 @@ if(TW_SANITIZER MATCHES "thread")
     PASS_REGULAR_EXPRESSION "data race")
 endif()
 
+add_executable(tw_server apps/tw_server.cpp)
+target_link_libraries(tw_server PRIVATE libserver)
+add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
+set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
+add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
+set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)
 
