@@ -19,7 +19,7 @@ if(TW_SANITIZER)
   target_link_options(tickwire_sim_flags INTERFACE -fsanitize=${TW_SANITIZER})
 endif()
 
-add_library(libsim STATIC src/sim/sim.cpp)
+add_library(libsim STATIC src/sim/sim.cpp src/sim/world.cpp)
 target_include_directories(libsim PUBLIC src)
 target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 
@@ -37,6 +37,10 @@ endfunction()
 add_executable(smoke_test tests/smoke_test.cpp)
 target_link_libraries(smoke_test PRIVATE libsim GTest::gtest_main)
 add_test(NAME smoke_test COMMAND smoke_test)
+
+add_executable(world_test tests/sim/world_test.cpp)
+target_link_libraries(world_test PRIVATE libsim GTest::gtest_main)
+add_test(NAME world_test COMMAND world_test)
 
 tw_add_test(bytes_test tests/net/bytes_test.cpp)
 tw_add_test(protocol_test tests/net/protocol_test.cpp)
