@@ -265,6 +265,86 @@ endpoint-to-player binding as a requirement, not an afterthought.
 
 ## P2 — Authoritative server, `World`, first demo
 
+**Pivot — the wire format reopened once, deliberately, to add `aim_x`/`aim_y`
+to `InputCommand` at protocol version 2.** P1 froze `InputCommand` at 17
+bytes before any consumer of an aim direction existed; P2's hitscan needs
+one. Two alternatives were considered and lost: a separate `kFire` message
+(rejected — it would need its own aim payload anyway, so it's the same cost
+with an extra message type and no benefit) and aiming along the movement
+vector (rejected — it forces "strafe to aim," which fights P6's rewind story
+and would look wrong in the demo, where mouse-aim is expected). Contained to
+Task 3, which re-froze the format in the same commit; no other task changed
+a byte layout. See `docs/wire-format.md` for the frozen v2 tables.
+
+**Decision — `PacketRing` prefigures P5's `SpscRing` API while being
+explicitly non-atomic.** Same four-call shape (`acquireWrite`/`commitWrite`/
+`acquireRead`/`commitRead`, monotonic indices, power-of-two masking) the
+resolution doc fixed for `SpscRing` at P0, but single-threaded with no
+`#include <atomic>` — so nobody mistakes it for the lock-free version. P5
+swaps the implementation behind the same calls and benchmarks one against
+the other, rather than restructuring the server to add threading.
+
+**Decision — endpoint↔player-id binding is a single chokepoint in the
+router, not a per-call-site check.** `Server::handleInput` is the only place
+a decoded `InputCommand` reaches `World::applyInput`, gated by one
+`SessionTable::authorize()` call. This is what makes the P1-deferred finding
+(no binding between a decoded `player_id` and the UDP source it arrived
+from) actually closeable by inspection — verified by grepping every call
+site of `World::applyInput`, not just trusting the code's shape (see the
+Task 8 security review below).
+
+**Decision — hit counts stay server-side, off the wire.** `PlayerState` is
+frozen at 24 bytes with no room for health or a hit counter, and the format
+is being reopened exactly once this phase (see the pivot above), not twice.
+`Server` tracks `hits(player_id)` in a private array; P6 can add a
+client-visible hit-feedback `MsgType` additively (values 6–255 are unused)
+without touching the header or the version.
+
+**Decision — spawn positions are server policy, not simulation.** Player id
+`i` spawns at a deterministic 8×4 grid position
+(`x = -35 + 10*((i-1)%8)`, `y = -35 + 10*((i-1)/8)`), computed in
+`Server::spawnPosition`, not in `libsim`. `World` only knows how to place a
+player wherever it's told; where that is is a server-level policy decision,
+kept out of the boundary that must stay I/O- and policy-free.
+
+**Decision — the 60 Hz sim / 20 Hz snapshot cadence mismatch is deliberate,
+not a bug to "fix."** `Server::tick()` steps the world every call but only
+broadcasts a snapshot every third tick (`kSnapshotIntervalTicks = 3`). This
+is what creates the need P4 exists to fix (entity interpolation smoothing
+between sparser snapshots) — Task 8's `Client<T>` deliberately has no
+interpolation or prediction yet, so the demo's visible lag at P2 is the
+correct "before" state, not an oversight.
+
+**Finding — the raylib display path works.** The one flagged environment
+risk going into this phase (resolution doc § Q5 residual risk 2) resolved
+cleanly: `tw_client --selftest` opens a real 800×800 GLX window through
+WSLg's X11 passthrough into the container (Mesa/llvmpipe software
+rasterizer, OpenGL 4.5 Core Profile), draws one frame, and exits 0; with
+`DISPLAY` unset it exits 77 (CTest's `SKIP_RETURN_CODE`, not a failure). Two
+unrelated environment defects had to be fixed first, both in the pinned
+image, not in raylib or the project's own code:
+- `bullseye-security`'s apt package *index* had drifted out of sync with its
+  *pool* (a known Debian-archive gap once a package is superseded) — `curl`
+  and `libgl1-mesa-dri` 404'd reproducibly, including across a `--no-cache`
+  rebuild. Pinning individual package versions just pushed the same conflict
+  onto their transitive dependencies, so the fix was disabling
+  `bullseye-security` for this build entirely (every needed package resolves
+  from plain `bullseye/main`, and a build-time toolchain image has no
+  runtime exposure security patches would meaningfully cover).
+- `scripts/tw`'s image tag bumped to `tickwire-dev:gcc10-cmake3.28.4-x11`
+  (required — `scripts/tw` skips the build when the tag already exists, so
+  editing the `Dockerfile` alone would have silently reused the stale
+  image), with X11 passthrough (`DISPLAY` plus the `/tmp/.X11-unix` mount)
+  applied only when both are present on the host, so CI (no X socket) is
+  unaffected.
+
+The full interactive/visual behavior (WASD feel, mouse aim, the latency
+slider's effect on visible lag) was smoke-tested — server plus two GUI
+clients ran 8s at target 60 FPS with no crash — but not eyeballed by this
+session: the windows render through WSLg onto the host desktop, which this
+session has no tool to capture or click into. That verification needs a
+human actually running `scripts/tw bash scripts/demo.sh` and watching.
+
 ### Task 8 boundary — mandatory security review findings
 
 Threat model (same as P1's): an unauthenticated attacker controls every byte
@@ -360,4 +440,4 @@ not a surprise.
 
 ---
 
-<!-- Next section: ## P2 continued — Task 9/10 decisions -->
+<!-- Next section: ## P3 — Prediction, reconciliation, clock sync -->

@@ -97,6 +97,12 @@ TEST(PollSetTest, ReportsWhichOfTheSocketAndTheTimerIsReady) {
 
   std::array<uint32_t, 8> out{};
 
+  // The timer is 1ms-period; under system load, enough wall time can pass
+  // between construction (above) and here for it to have already fired
+  // once. Drain that first, so the steady-state "nothing ready" check below
+  // isn't racing construction overhead.
+  timer.consumeExpirations();
+
   EXPECT_EQ(poll.wait(0, out), 0u);
 
   const std::array<std::byte, 5> payload{std::byte{1}, std::byte{2}, std::byte{3},
