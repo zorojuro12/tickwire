@@ -23,6 +23,14 @@ class Server {
  public:
   explicit Server(T& transport) noexcept : transport_(transport) {}
 
+  // A reference member already blocks copy/move assignment; the copy
+  // constructor is not implicitly deleted, and copying would deep-copy
+  // World/SessionTable/PacketRing while binding the copy's transport_ to
+  // the SAME transport as the original -- two independent simulation
+  // states silently sharing one socket. No call site needs this.
+  Server(const Server&) = delete;
+  Server(Server&&) = delete;
+
   // Drains the transport into the ring; returns packets accepted.
   size_t ingest() noexcept {
     size_t accepted = 0;

@@ -45,8 +45,8 @@ void injectLeaveAck(RecordingTransport& tp, uint16_t ack_seq) {
 }
 
 TEST(ClientTest, FreshClientIsIdle) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
 
   EXPECT_EQ(c.state(), State::kIdle);
   EXPECT_EQ(c.playerId(), 0u);
@@ -55,19 +55,19 @@ TEST(ClientTest, FreshClientIsIdle) {
   EXPECT_EQ(c.joinAttempts(), 0u);
 
   EXPECT_FALSE(c.sendInput(0, 1.0f, 0.0f, 0.0f, 0.0f, false));
-  EXPECT_EQ(tp.sentCount(), 0u);
+  EXPECT_EQ(tp->sentCount(), 0u);
 }
 
 TEST(ClientTest, JoinHandshakeRetransmitsUntilAnsweredThenStops) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
 
   c.beginJoin(1000);
   EXPECT_EQ(c.state(), State::kJoining);
   EXPECT_EQ(c.joinAttempts(), 1u);
-  ASSERT_EQ(tp.sentCount(), 1u);
+  ASSERT_EQ(tp->sentCount(), 1u);
   {
-    const RecordingTransport::Sent& s = tp.sentAt(0);
+    const RecordingTransport::Sent& s = tp->sentAt(0);
     EXPECT_EQ(s.to, kServerEp);
     net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
     net::PacketHeader h;
@@ -81,14 +81,14 @@ TEST(ClientTest, JoinHandshakeRetransmitsUntilAnsweredThenStops) {
 
   // 14 further ticks send nothing more.
   for (int i = 0; i < 14; ++i) c.tick(1000 + static_cast<uint32_t>(i) * 16);
-  EXPECT_EQ(tp.sentCount(), 1u);
+  EXPECT_EQ(tp->sentCount(), 1u);
 
   // The 15th sends a second identical join request.
   c.tick(1000 + 14 * 16);
-  EXPECT_EQ(tp.sentCount(), 2u);
+  EXPECT_EQ(tp->sentCount(), 2u);
   EXPECT_EQ(c.joinAttempts(), 2u);
   {
-    const RecordingTransport::Sent& s = tp.sentAt(1);
+    const RecordingTransport::Sent& s = tp->sentAt(1);
     net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
     net::PacketHeader h;
     ASSERT_TRUE(net::decodeHeader(r, h));
@@ -98,27 +98,27 @@ TEST(ClientTest, JoinHandshakeRetransmitsUntilAnsweredThenStops) {
 }
 
 TEST(ClientTest, AcceptanceStopsRetransmissionAndAssignsTheId) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
 
-  injectJoinAccept(tp, 4, kJoinSeq);
+  injectJoinAccept(*tp, 4, kJoinSeq);
   c.tick(16);
 
   EXPECT_EQ(c.state(), State::kJoined);
   EXPECT_EQ(c.playerId(), 4u);
 
-  const size_t sent_before = tp.sentCount();
+  const size_t sent_before = tp->sentCount();
   for (int i = 0; i < 60; ++i) c.tick(32 + static_cast<uint32_t>(i) * 16);
-  EXPECT_EQ(tp.sentCount(), sent_before);
+  EXPECT_EQ(tp->sentCount(), sent_before);
 }
 
 TEST(ClientTest, MismatchedAckIsIgnored) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
 
-  injectJoinAccept(tp, 4, 9);
+  injectJoinAccept(*tp, 4, 9);
   c.tick(16);
 
   EXPECT_EQ(c.state(), State::kJoining);
@@ -126,22 +126,22 @@ TEST(ClientTest, MismatchedAckIsIgnored) {
 }
 
 TEST(ClientTest, RejectionMovesToRejectedAndStopsSending) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
 
-  injectLeaveAck(tp, kJoinSeq);
+  injectLeaveAck(*tp, kJoinSeq);
   c.tick(16);
 
   EXPECT_EQ(c.state(), State::kRejected);
-  const size_t sent_before = tp.sentCount();
+  const size_t sent_before = tp->sentCount();
   for (int i = 0; i < 60; ++i) c.tick(32 + static_cast<uint32_t>(i) * 16);
-  EXPECT_EQ(tp.sentCount(), sent_before);
+  EXPECT_EQ(tp->sentCount(), sent_before);
 }
 
 TEST(ClientTest, GivingUpAfterMaxAttemptsFails) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
 
   uint32_t now_ms = 16;
@@ -158,22 +158,22 @@ TEST(ClientTest, GivingUpAfterMaxAttemptsFails) {
   }
 
   EXPECT_EQ(c.state(), State::kFailed);
-  const size_t sent_before = tp.sentCount();
+  const size_t sent_before = tp->sentCount();
   c.tick(now_ms);
-  EXPECT_EQ(tp.sentCount(), sent_before);
+  EXPECT_EQ(tp->sentCount(), sent_before);
 }
 
 TEST(ClientTest, JunkPacketsAreIgnored) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
   const uint32_t attempts_before = c.joinAttempts();
 
   std::array<std::byte, 3> tiny{};
-  tp.inject(kServerEp, tiny);
+  tp->inject(kServerEp, tiny);
 
   std::array<std::byte, net::kHeaderBytes> bad_magic{};
-  tp.inject(kServerEp, bad_magic);
+  tp->inject(kServerEp, bad_magic);
 
   {
     const sim::InputCommand in{.player_id = 1,
@@ -191,7 +191,7 @@ TEST(ClientTest, JunkPacketsAreIgnored) {
     std::array<std::byte, net::kMaxPacket> buf{};
     const size_t written = net::framePacket(h, payload, buf);
     ASSERT_GT(written, 0u);
-    tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+    tp->inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
   }
 
   c.tick(16);
@@ -228,18 +228,18 @@ sim::WorldSnapshot twoPlayerSnapshot(uint32_t tick) {
 }
 
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
-  RecordingTransport tp;
-  Client<RecordingTransport> c(tp, kServerEp);
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
   c.beginJoin(0);
-  injectJoinAccept(tp, 4, kJoinSeq);
+  injectJoinAccept(*tp, 4, kJoinSeq);
   c.tick(16);
   ASSERT_EQ(c.playerId(), 4u);
-  const size_t sent_before_input = tp.sentCount();
+  const size_t sent_before_input = tp->sentCount();
 
   EXPECT_TRUE(c.sendInput(2000, 1.0f, 0.0f, 0.0f, 1.0f, true));
-  ASSERT_EQ(tp.sentCount(), sent_before_input + 1);
+  ASSERT_EQ(tp->sentCount(), sent_before_input + 1);
   {
-    const RecordingTransport::Sent& s = tp.sentAt(sent_before_input);
+    const RecordingTransport::Sent& s = tp->sentAt(sent_before_input);
     net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
     net::PacketHeader h;
     ASSERT_TRUE(net::decodeHeader(r, h));
@@ -256,7 +256,7 @@ TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
     EXPECT_TRUE(in.fire);
   }
 
-  injectSnapshot(tp, 30, 5000, twoPlayerSnapshot(30));
+  injectSnapshot(*tp, 30, 5000, twoPlayerSnapshot(30));
   c.tick(2016);
   EXPECT_EQ(c.snapshotsReceived(), 1u);
   EXPECT_EQ(c.latestSnapshotTick(), 30u);
@@ -267,13 +267,13 @@ TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   EXPECT_EQ(c.latestSnapshot().players[1].id, 2u);
 
   // Stale (tick 27 after tick 30) is dropped, but still counted as received.
-  injectSnapshot(tp, 27, 5016, twoPlayerSnapshot(27));
+  injectSnapshot(*tp, 27, 5016, twoPlayerSnapshot(27));
   c.tick(2032);
   EXPECT_EQ(c.snapshotsReceived(), 2u);
   EXPECT_EQ(c.latestSnapshotTick(), 30u);
 
   // A newer one (tick 33) is adopted.
-  injectSnapshot(tp, 33, 5032, twoPlayerSnapshot(33));
+  injectSnapshot(*tp, 33, 5032, twoPlayerSnapshot(33));
   c.tick(2048);
   EXPECT_EQ(c.snapshotsReceived(), 3u);
   EXPECT_EQ(c.latestSnapshotTick(), 33u);
@@ -290,17 +290,17 @@ TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
     std::array<std::byte, net::kMaxPacket> buf{};
     const size_t written = net::framePacket(h, bad_payload, buf);
     ASSERT_GT(written, 0u);
-    tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+    tp->inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
   }
   c.tick(2064);
   EXPECT_EQ(c.latestSnapshotTick(), 33u);
 
   // leave() sends one kLeave and returns to kIdle.
-  const size_t sent_before_leave = tp.sentCount();
+  const size_t sent_before_leave = tp->sentCount();
   c.leave(3000);
-  ASSERT_EQ(tp.sentCount(), sent_before_leave + 1);
+  ASSERT_EQ(tp->sentCount(), sent_before_leave + 1);
   {
-    const RecordingTransport::Sent& s = tp.sentAt(sent_before_leave);
+    const RecordingTransport::Sent& s = tp->sentAt(sent_before_leave);
     net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
     net::PacketHeader h;
     ASSERT_TRUE(net::decodeHeader(r, h));

@@ -25,6 +25,11 @@ class Client {
   Client(T& transport, net::Endpoint server) noexcept
       : transport_(transport), server_(server) {}
 
+  // See server::Server's identical note: a reference member blocks copy/move
+  // assignment but not the copy constructor, and no call site needs it.
+  Client(const Client&) = delete;
+  Client(Client&&) = delete;
+
   void beginJoin(uint32_t now_ms) noexcept {
     state_ = State::kJoining;
     join_attempts_ = 1;
