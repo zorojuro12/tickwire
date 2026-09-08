@@ -49,6 +49,10 @@ class Server {
     world_.step();
 
     if (world_.tick() % kSnapshotIntervalTicks == 0) broadcastSnapshot(now_ms);
+
+    std::array<uint32_t, kMaxExpired> expired{};
+    const size_t expired_count = sessions_.expire(world_.tick(), expired);
+    for (size_t i = 0; i < expired_count; ++i) world_.removePlayer(expired[i]);
   }
 
   size_t queuedPackets() const noexcept { return ring_.size(); }
@@ -84,10 +88,27 @@ class Server {
       case net::MsgType::kInput:
         handleInput(slot.peer, r);
         break;
+      case net::MsgType::kLeave:
+        handleLeave(slot.peer, h);
+        break;
       default:
         ++dropped_;
         break;
     }
+  }
+
+  void handleLeave(const net::Endpoint& from, const net::PacketHeader& h) noexcept {
+    if (h.payload_len != 0) {
+      ++dropped_;
+      return;
+    }
+    const uint32_t id = sessions_.playerFor(from);
+    if (id == sim::kInvalidPlayerId) {
+      ++dropped_;
+      return;
+    }
+    sessions_.remove(from);
+    world_.removePlayer(id);
   }
 
   void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {

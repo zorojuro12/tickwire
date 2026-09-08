@@ -490,5 +490,106 @@ TEST(ServerTest, NoSessionsMeansNoSnapshotButTheWorldStillTicks) {
   EXPECT_EQ(srv->worldTick(), 3u);
 }
 
+void injectLeave(RecordingTransport& tp, const net::Endpoint& from) {
+  net::PacketHeader h;
+  h.type = net::MsgType::kLeave;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, {}, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ServerTest, LeaveRemovesThePlayerAndSendsNoReply) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2030u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2031u};
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->world().playerCount(), 2u);
+  const uint32_t id_b = srv->playerFor(kEpB);
+  tp->clearSent();
+
+  injectLeave(*tp, kEpA);
+  srv->ingest();
+  srv->tick(16);
+
+  EXPECT_EQ(srv->world().playerCount(), 1u);
+  EXPECT_EQ(srv->playerFor(kEpA), 0u);
+  EXPECT_TRUE(srv->world().hasPlayer(id_b));
+
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    EXPECT_NE(tp->sentAt(i).to, kEpA) << "no reply should go to a departed endpoint";
+  }
+}
+
+TEST(ServerTest, LeaveFromAnUnknownEndpointIsDropped) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2032u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->world().playerCount(), 1u);
+
+  constexpr net::Endpoint kUnknown{0x7F000001u, 0x2033u};
+  const uint64_t dropped_before = srv->droppedPackets();
+  injectLeave(*tp, kUnknown);
+  srv->ingest();
+  srv->tick(16);
+
+  EXPECT_EQ(srv->droppedPackets(), dropped_before + 1);
+  EXPECT_EQ(srv->world().playerCount(), 1u);
+}
+
+TEST(ServerTest, SilentSessionsTimeOutAndTheFreedIdIsReusable) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2040u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2041u};
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->world().playerCount(), 2u);
+  const uint32_t id_a = srv->playerFor(kEpA);
+  const uint32_t id_b = srv->playerFor(kEpB);
+
+  uint32_t now_ms = 16;
+  for (uint32_t i = 0; i < kSessionTimeoutTicks; ++i) {
+    injectInput(*tp, kEpB, id_b, 0.0f, 0.0f, 0.0f, 0.0f, false, i);
+    srv->ingest();
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  EXPECT_EQ(srv->world().playerCount(), 1u);
+  EXPECT_EQ(srv->playerFor(kEpA), 0u);
+  EXPECT_FALSE(srv->world().hasPlayer(id_a));
+  EXPECT_EQ(srv->playerFor(kEpB), id_b);
+  EXPECT_TRUE(srv->world().hasPlayer(id_b));
+
+  // A rejoin after timeout works; the id may differ.
+  injectJoin(*tp, kEpA, 5);
+  srv->ingest();
+  srv->tick(now_ms);
+  EXPECT_EQ(srv->world().playerCount(), 2u);
+  EXPECT_NE(srv->playerFor(kEpA), 0u);
+
+  // The freed id (epA's original) is reusable by the next joiner.
+  constexpr net::Endpoint kEpC{0x7F000001u, 0x2042u};
+  injectLeave(*tp, kEpA);
+  srv->ingest();
+  srv->tick(now_ms + 16);
+  injectJoin(*tp, kEpC, 1);
+  srv->ingest();
+  srv->tick(now_ms + 32);
+  EXPECT_EQ(srv->playerFor(kEpC), id_a);
+}
+
 }  // namespace
 }  // namespace server
