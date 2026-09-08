@@ -102,5 +102,26 @@ TEST(SessionTableTest, IterationCoversExactlyTheLiveSessions) {
   }
 }
 
+TEST(SessionTableTest, AuthorizationRejectsAMismatchedOrUnknownEndpoint) {
+  SessionTable table;
+
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+  const uint32_t b = table.joinOrGet(ep(1), 0);
+  ASSERT_NE(a, b);
+
+  EXPECT_TRUE(table.authorize(ep(0), a));
+  EXPECT_FALSE(table.authorize(ep(0), b));  // spoof case
+  EXPECT_FALSE(table.authorize(ep(1), a));  // mirror
+  EXPECT_FALSE(table.authorize(ep(2), a));  // no session at all
+  EXPECT_FALSE(table.authorize(ep(0), 0));
+  EXPECT_FALSE(table.authorize(ep(0), 99));
+
+  ASSERT_TRUE(table.remove(ep(0)));
+  EXPECT_FALSE(table.authorize(ep(0), a));
+
+  net::Endpoint different_port{ep(0).addr_be, static_cast<uint16_t>(ep(0).port_be + 1)};
+  EXPECT_FALSE(table.authorize(different_port, a));
+}
+
 }  // namespace
 }  // namespace server
