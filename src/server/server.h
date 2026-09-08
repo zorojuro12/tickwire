@@ -53,6 +53,10 @@ class Server {
   uint32_t worldTick() const noexcept { return world_.tick(); }
   const sim::World& world() const noexcept { return world_; }
   uint32_t playerFor(const net::Endpoint& ep) const noexcept { return sessions_.playerFor(ep); }
+  uint64_t hits(uint32_t player_id) const noexcept {
+    if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
+    return hits_[player_id - 1];
+  }
   uint64_t droppedPackets() const noexcept { return dropped_; }
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
 
@@ -75,9 +79,31 @@ class Server {
       case net::MsgType::kJoinRequest:
         handleJoin(slot.peer, h, now_ms);
         break;
+      case net::MsgType::kInput:
+        handleInput(slot.peer, r);
+        break;
       default:
         ++dropped_;
         break;
+    }
+  }
+
+  void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {
+    sim::InputCommand in{};
+    if (!net::decodeInput(r, in)) {
+      ++dropped_;
+      return;
+    }
+    if (!sessions_.authorize(from, in.player_id)) {
+      ++dropped_;
+      return;
+    }
+    sessions_.touch(from, world_.tick(), in.tick);
+    world_.applyInput(in);
+    if (in.fire && sessions_.tryFire(in.player_id, world_.tick())) {
+      if (world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y).has_value()) {
+        ++hits_[in.player_id - 1];
+      }
     }
   }
 
@@ -145,6 +171,7 @@ class Server {
   SessionTable sessions_;
   PacketRing<net::PacketSlot, kIngestCapacity> ring_;
   std::array<std::byte, net::kMaxPacket> send_buf_{};
+  std::array<uint64_t, sim::kMaxPlayers> hits_{};
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;
 };

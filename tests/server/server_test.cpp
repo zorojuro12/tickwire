@@ -1,6 +1,7 @@
 #include "server/server.h"
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <span>
 
@@ -193,6 +194,221 @@ TEST(ServerTest, FullSessionTableRejectsWithLeave) {
   EXPECT_EQ(h.type, net::MsgType::kLeave);
   EXPECT_EQ(h.ack_seq, 99u);
   EXPECT_EQ(h.payload_len, 0u);
+}
+
+// Frames and injects one kInput packet from `from`, claiming `player_id`.
+void injectInput(RecordingTransport& tp, const net::Endpoint& from, uint32_t player_id,
+                  float move_x, float move_y, float aim_x, float aim_y, bool fire,
+                  uint32_t tick = 0) {
+  const sim::InputCommand in{.player_id = player_id,
+                              .tick = tick,
+                              .move_x = move_x,
+                              .move_y = move_y,
+                              .aim_x = aim_x,
+                              .aim_y = aim_y,
+                              .fire = fire};
+  std::array<std::byte, net::kInputBytes> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeInput(in, pw));
+
+  net::PacketHeader h;
+  h.type = net::MsgType::kInput;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+void injectJoin(RecordingTransport& tp, const net::Endpoint& from, uint16_t seq = 1) {
+  net::PacketHeader h;
+  h.type = net::MsgType::kJoinRequest;
+  h.seq = seq;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, {}, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2000u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2001u};
+  constexpr net::Endpoint kEpC{0x7F000001u, 0x2002u};
+
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->playerFor(kEpA), 1u);
+  ASSERT_EQ(srv->playerFor(kEpB), 2u);
+
+  // A legitimate input from epA moves player 1 only.
+  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false);
+  srv->ingest();
+  srv->tick(16);
+  {
+    sim::WorldSnapshot snap{};
+    srv->world().writeSnapshot(snap);
+    const sim::PlayerState* p1 = nullptr;
+    const sim::PlayerState* p2 = nullptr;
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == 1) p1 = &snap.players[i];
+      if (snap.players[i].id == 2) p2 = &snap.players[i];
+    }
+    ASSERT_NE(p1, nullptr);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_EQ(p1->vx, sim::kMoveSpeed);
+    EXPECT_EQ(p1->x, -35.0f + sim::kMoveSpeed * sim::kTickDt);
+    EXPECT_EQ(p2->vx, 0.0f);
+    EXPECT_EQ(p2->x, -25.0f);
+  }
+
+  // Spoof: epA claims to be player 2.
+  const uint64_t dropped_before_spoof = srv->droppedPackets();
+  injectInput(*tp, kEpA, 2, 1.0f, 0.0f, 0.0f, 0.0f, false);
+  srv->ingest();
+  srv->tick(32);
+  {
+    sim::WorldSnapshot snap{};
+    srv->world().writeSnapshot(snap);
+    const sim::PlayerState* p1 = nullptr;
+    const sim::PlayerState* p2 = nullptr;
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == 1) p1 = &snap.players[i];
+      if (snap.players[i].id == 2) p2 = &snap.players[i];
+    }
+    ASSERT_NE(p1, nullptr);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_EQ(p2->vx, 0.0f);
+    EXPECT_EQ(p2->x, -25.0f);
+    EXPECT_EQ(p1->vx, sim::kMoveSpeed);  // player 1 keeps its latched velocity
+  }
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_spoof + 1);
+
+  // An input from an endpoint with no session at all, claiming player 1.
+  const uint64_t dropped_before_unknown = srv->droppedPackets();
+  const float p1_x_before = [&] {
+    sim::WorldSnapshot snap{};
+    srv->world().writeSnapshot(snap);
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == 1) return snap.players[i].x;
+    }
+    return 0.0f;
+  }();
+  injectInput(*tp, kEpC, 1, -1.0f, 0.0f, 0.0f, 0.0f, false);
+  srv->ingest();
+  srv->tick(48);
+  {
+    // The dropped packet must not touch player 1's velocity: it keeps
+    // moving at its already-latched +x speed, not the rejected -1 input.
+    sim::WorldSnapshot snap{};
+    srv->world().writeSnapshot(snap);
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == 1) {
+        EXPECT_EQ(snap.players[i].vx, sim::kMoveSpeed);
+        EXPECT_EQ(snap.players[i].x, p1_x_before + sim::kMoveSpeed * sim::kTickDt);
+      }
+    }
+  }
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_unknown + 1);
+
+  // Malformed payload: 23 bytes (payload_len disagrees with the frame).
+  const uint64_t dropped_before_malformed = srv->droppedPackets();
+  {
+    net::PacketHeader h;
+    h.type = net::MsgType::kInput;
+    std::array<std::byte, 23> short_payload{};
+    std::array<std::byte, net::kMaxPacket> buf{};
+    const size_t written = net::framePacket(h, short_payload, buf);
+    ASSERT_GT(written, 0u);
+    tp->inject(kEpA, std::span<const std::byte>(buf).subspan(0, written));
+  }
+  srv->ingest();
+  srv->tick(64);
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_malformed + 1);
+
+  // A well-framed 25-byte payload with a NaN move_x.
+  const uint64_t dropped_before_nan = srv->droppedPackets();
+  {
+    const sim::InputCommand in{.player_id = 1,
+                                .tick = 0,
+                                .move_x = std::numeric_limits<float>::quiet_NaN(),
+                                .move_y = 0.0f,
+                                .aim_x = 0.0f,
+                                .aim_y = 0.0f,
+                                .fire = false};
+    std::array<std::byte, net::kInputBytes> payload{};
+    net::ByteWriter pw(payload);
+    ASSERT_TRUE(net::encodeInput(in, pw));
+    net::PacketHeader h;
+    h.type = net::MsgType::kInput;
+    std::array<std::byte, net::kMaxPacket> buf{};
+    const size_t written = net::framePacket(h, payload, buf);
+    ASSERT_GT(written, 0u);
+    tp->inject(kEpA, std::span<const std::byte>(buf).subspan(0, written));
+  }
+  srv->ingest();
+  srv->tick(80);
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_nan + 1);
+
+  // Wrong magic header.
+  const uint64_t dropped_before_magic = srv->droppedPackets();
+  {
+    std::array<std::byte, net::kHeaderBytes> bad{};
+    tp->inject(kEpA, bad);
+  }
+  srv->ingest();
+  srv->tick(96);
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_magic + 1);
+
+  // A 3-byte packet.
+  const uint64_t dropped_before_short = srv->droppedPackets();
+  {
+    std::array<std::byte, 3> tiny{};
+    tp->inject(kEpA, tiny);
+  }
+  srv->ingest();
+  srv->tick(112);
+  EXPECT_EQ(srv->droppedPackets(), dropped_before_short + 1);
+}
+
+TEST(ServerTest, FiringHitsTheNearestPlayerAlongTheAimAndIsRateLimited) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2010u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2011u};
+
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->playerFor(kEpA), 1u);
+  ASSERT_EQ(srv->playerFor(kEpB), 2u);
+
+  // Player 1 spawns at (-35, -35); player 2 spawns at (-25, -35) -- directly
+  // along +x from player 1, per the 8x4 spawn grid.
+  EXPECT_EQ(srv->hits(1), 0u);
+
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 10);
+  srv->ingest();
+  srv->tick(16);
+  EXPECT_EQ(srv->hits(1), 1u);
+
+  // A second shot one tick later is still on cooldown.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 11);
+  srv->ingest();
+  srv->tick(32);
+  EXPECT_EQ(srv->hits(1), 1u);
+
+  // Clear the cooldown, then fire a miss (aiming away): hits stays unchanged.
+  for (int i = 0; i < 15; ++i) srv->tick(48 + i * 16);
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, -1.0f, 0.0f, true, 30);
+  srv->ingest();
+  srv->tick(300);
+  EXPECT_EQ(srv->hits(1), 1u);
 }
 
 }  // namespace
