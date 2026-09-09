@@ -5,6 +5,11 @@
 namespace server {
 namespace {
 
+sim::InputCommand makeInput(uint32_t tick) {
+  return sim::InputCommand{
+      .player_id = 1, .tick = tick, .move_x = 0, .move_y = 0, .aim_x = 0, .aim_y = 0, .fire = false};
+}
+
 TEST(InputBufferTest, TakeForReturnsTheInputStampedForThatTick) {
   InputBuffer b;
   EXPECT_TRUE(b.push(sim::InputCommand{.player_id = 1,
@@ -44,6 +49,33 @@ TEST(InputBufferTest, HighestTickTracksTheNewestAcceptedInput) {
   sim::InputCommand out{};
   EXPECT_TRUE(b.takeFor(7, out));
   EXPECT_EQ(b.highestTick(), 7u);
+}
+
+TEST(InputBufferTest, PushRejectsOutsideTheAcceptanceWindow) {
+  InputBuffer b;
+
+  EXPECT_FALSE(b.push(makeInput(0)));
+  EXPECT_EQ(b.highestTick(), 0u);
+
+  EXPECT_TRUE(b.push(makeInput(kInputBufferSlots)));
+  EXPECT_FALSE(b.push(makeInput(kInputBufferSlots + 1)));
+  EXPECT_EQ(b.highestTick(), kInputBufferSlots);
+
+  // Nothing was pushed at tick 10, so this is a legitimate underrun (false)
+  // -- the point of this call is to drive the consumption floor forward.
+  sim::InputCommand out{};
+  b.takeFor(10, out);
+  EXPECT_EQ(b.lastConsumed(), 10u);
+
+  EXPECT_FALSE(b.push(makeInput(10)));
+  EXPECT_FALSE(b.push(makeInput(9)));
+  EXPECT_TRUE(b.push(makeInput(11)));
+
+  InputBuffer silent;
+  for (uint32_t t = 1; t <= 40; ++t) {
+    EXPECT_FALSE(silent.takeFor(t, out));
+  }
+  EXPECT_TRUE(silent.push(makeInput(45)));
 }
 
 }  // namespace
