@@ -1,0 +1,31 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+#include "sim/sim.h"
+
+namespace server {
+
+inline constexpr size_t kInputBufferSlots = 16;  // power of two; 266 ms of input at 60 Hz
+inline constexpr uint32_t kInputBufferMask = kInputBufferSlots - 1;
+
+// Per-session, tick-keyed input storage. Pure: no I/O, no clock, no
+// allocation. Indexed by tick & kInputBufferMask, so lookup is O(1) and the
+// acceptance window is what prevents two ticks aliasing onto one slot.
+class InputBuffer {
+ public:
+  // Accepts `in`, storing it against the slot its tick maps to.
+  bool push(const sim::InputCommand& in) noexcept;
+
+  // Writes the input stamped exactly `tick` into `out` and returns true.
+  // Returns false on an underrun -- no input is held for that tick.
+  bool takeFor(uint32_t tick, sim::InputCommand& out) noexcept;
+
+ private:
+  std::array<sim::InputCommand, kInputBufferSlots> slots_{};
+  std::array<bool, kInputBufferSlots> filled_{};
+};
+
+}  // namespace server
