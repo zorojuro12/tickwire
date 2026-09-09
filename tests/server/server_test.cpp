@@ -462,6 +462,50 @@ TEST(ServerTest, FiringHitsTheNearestPlayerAlongTheAimAndIsRateLimited) {
   EXPECT_EQ(srv->hits(1), 1u);
 }
 
+// World::step() -- the sole place a position integrates -- runs after both
+// tick()'s apply pass and its fire-resolution pass. So a shot always
+// evaluates against positions as of the START of the tick, never against
+// any movement submitted for that same tick, from the shooter or the
+// target. This test pins that: if step() were ever called before or
+// between the two passes, this would start passing (a false hit) instead
+// of failing to hit.
+TEST(ServerTest, FireResolvesAgainstPositionsFromBeforeThisTicksMovement) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2052u};  // shooter, player 1
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2053u};  // target, player 2
+
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);  // world at tick 1; both spawn on the same row (y = -35)
+
+  // Move player 2 off player 1's aim line, clear of the hitscan radius
+  // (0.5): 4 ticks * kMoveSpeed * kTickDt =~ 0.533, just past it.
+  uint32_t tick = 2;
+  uint32_t now_ms = 16;
+  for (int i = 0; i < 4; ++i) {
+    injectInput(*tp, kEpB, 2, 0.0f, 1.0f, 0.0f, 0.0f, false, tick);
+    srv->ingest();
+    srv->tick(now_ms);
+    ++tick;
+    now_ms += 16;
+  }
+  EXPECT_EQ(srv->hits(1), 0u);
+
+  // Same tick: player 1 fires along +x, and player 2 submits a downward
+  // move that -- if it took effect before the shot resolved -- would bring
+  // it back inside the radius. It must not: the shot evaluates against
+  // player 2's pre-tick position and misses.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, tick);
+  injectInput(*tp, kEpB, 2, 0.0f, -1.0f, 0.0f, 0.0f, false, tick);
+  srv->ingest();
+  srv->tick(now_ms);
+
+  EXPECT_EQ(srv->hits(1), 0u);
+}
+
 TEST(ServerTest, SnapshotsGoOutAt20HzToEveryLiveSession) {
   auto tp = std::make_unique<RecordingTransport>();
   auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
