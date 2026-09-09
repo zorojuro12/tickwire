@@ -403,5 +403,25 @@ TEST(WorldTest, HitscanDistanceTiesResolveToTheLowerPlayerId) {
   }
 }
 
+TEST(WorldTest, SetPlayerStateOverwritesPositionAndVelocity) {
+  auto w = std::make_unique<World>();
+  ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));
+
+  EXPECT_TRUE(w->setPlayerState(
+      PlayerState{1, 10.0f, -10.0f, sim::kMoveSpeed, 0.0f, sim::kPlayerRadius}));
+
+  auto p = snapshotFor(*w, 1);
+  ASSERT_TRUE(p.has_value());
+  EXPECT_EQ(p->x, 10.0f);
+  EXPECT_EQ(p->y, -10.0f);
+  EXPECT_EQ(p->vx, sim::kMoveSpeed);
+  EXPECT_EQ(p->vy, 0.0f);
+
+  w->step();
+  auto after = snapshotFor(*w, 1);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->x, 10.0f + sim::kMoveSpeed * sim::kTickDt);
+}
+
 }  // namespace
 }  // namespace sim

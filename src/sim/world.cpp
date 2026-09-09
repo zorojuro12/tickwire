@@ -62,6 +62,17 @@ void World::applyInput(const InputCommand& in) {
   }
 }
 
+bool World::setPlayerState(const PlayerState& s) {
+  int slot = findSlot(s.id);
+  if (slot < 0) return false;
+  if (!std::isfinite(s.x) || !std::isfinite(s.y) || !std::isfinite(s.vx) ||
+      !std::isfinite(s.vy) || !std::isfinite(s.radius)) {
+    return false;
+  }
+  players_[static_cast<uint32_t>(slot)] = s;
+  return true;
+}
+
 void World::step() {
   constexpr float kBound = kArenaHalf - kPlayerRadius;
   for (uint32_t i = 0; i < kMaxPlayers; ++i) {

@@ -16,6 +16,11 @@ class World {
   bool hasPlayer(uint32_t id) const noexcept;
   uint32_t playerCount() const noexcept;
   void applyInput(const InputCommand& in);  // silently ignores an unknown player_id
+  // Overwrites an existing player's position, velocity and radius from `s`,
+  // keyed by s.id. False when s.id is kInvalidPlayerId, is not present, or
+  // any of x/y/vx/vy/radius is non-finite. The stored state is untouched
+  // on false -- assigned only once every check has passed.
+  bool setPlayerState(const PlayerState& s);
   void step();                              // advances exactly kTickDt
   void writeSnapshot(WorldSnapshot& out) const;  // caller-owned buffer
   uint32_t tick() const noexcept;
