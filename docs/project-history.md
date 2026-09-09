@@ -440,4 +440,127 @@ not a surprise.
 
 ---
 
-<!-- Next section: ## P3 — Prediction, reconciliation, clock sync -->
+## P3 — Prediction, reconciliation, clock sync
+
+### Task 8 boundary — mandatory security review findings
+
+Threat model (same as P1/P2's): an unauthenticated attacker controls every byte
+of every datagram, can send them at any rate, and can forge any source address
+the network permits. Reviewed via the `security-reviewer` and `cpp-reviewer`
+agents in parallel over `src/server/`, `src/client/`, and `tests/`.
+
+**Fixed (CRITICAL) — `Client::handlePacket` accepted a packet from any
+source, not just the joined server.** `UdpTransport`'s socket is unconnected
+(`bind()` never calls `connect()`), so `recvfrom` hands back a datagram from
+*any* source reachable to the socket. `Client<T>` stored `server_` only as the
+destination for outgoing sends; `handlePacket` never checked `slot.peer`
+against it. This is a materially different, worse gap than the three findings
+below: none of it requires source-address spoofing, unlike every P2-deferred
+finding, which all require the attacker to already forge the *server's*
+address. Concrete, zero-spoofing failure scenarios: a single forged `Leave`
+with `ack_seq == kJoinSeq` while `kJoining` permanently blocks the client
+(`kRejected` has no retry path back out); a forged `JoinAccept` races the real
+server for an attacker-chosen player id; a stream of forged `Snapshot` packets
+reaches `ClockSync::observe` and can walk the client's clock via the snap path
+(deliberately exempt from the correction cooldown, so genuine large
+desyncs still recover immediately) at an attacker-chosen rate rather than the
+server's 20 Hz, eventually pushing every legitimate input outside the
+server's `InputBuffer` window. Fixed with one source-endpoint check
+(`if (slot.peer != server_) return;`) at the top of `handlePacket`, before any
+header decode — no wire-format impact. Verified RED (both scenarios
+reproduced exactly as predicted) with the check disabled, GREEN restored.
+
+**Fixed (HIGH) — a departed player's queued future input survived to execute
+under whoever inherited their id next.** `InputBuffer::reset()` existed
+(documented as clearing every slot) but was never called. `SessionTable`
+hands out the *lowest free* id, and `InputBuffer::push` accepts a tick up to
+`kInputBufferSlots` (64, ~1.07 s) ahead of the server's own progress — so a
+player who queues a future input and then leaves (or times out) leaves it
+sitting in `inputs_[id-1]`, keyed only by id. The next player handed that same
+id inherits it: `World::applyInput` (and `resolveHitscan`, if `fire` was set)
+runs under the new player's identity for a command they never sent. This
+reopens, at the `InputBuffer` layer, exactly the finding P2's own security
+review verified closed — the chokepoint itself still holds (`authorize()`
+gates every push, unchanged); the gap is that a buffered input's *lifetime*
+isn't tied to the session's, so authorization checked at push time doesn't
+protect against replay under a different, unconsenting owner of the same id
+later. Fixed by clearing the departing player's `InputBuffer` at both removal
+sites (`handleLeave`, and the timeout-expiry loop in `tick()`), immediately
+after `World::removePlayer`. Regression test covers the explicit-`Leave` path,
+verified RED then GREEN the same way as the finding above. The timeout-expiry
+call site's fix is deliberately left without an equivalent test:
+`kInputBufferSlots` (64) is narrower than `kSessionTimeoutTicks` (300), so a
+still-live session's own `tick()` pass naturally consumes anything queued
+within the window long before 300 ticks of silence could ever trigger
+`expire()` — correct, consistent defensive practice (and it protects against
+either constant changing independently later), but not an independently
+exploitable path today given the current values.
+
+**Fixed (MEDIUM) — `predicted_scratch_` was a persistent member used as a
+call-scoped buffer.** `localPosition()` and `reconcile()` both wrote through it
+via `predicted_.writeSnapshot(...)` but never needed its contents to persist
+between calls. Converted to a local `sim::WorldSnapshot` in each, removing an
+unnecessary `mutable` and shrinking every `Client<T>` by ~776 B.
+
+**Deferred, not fixed (LOW) — `ClockSync::lead_` truncates a wider-range value
+on the diagnostic accessor only.** `raw_lead` is computed in `int64_t` (needed,
+since `ack_tick`/`server_tick` are `uint32_t` and their difference can be
+large), but `lead_ = static_cast<int32_t>(raw_lead)` narrows it before storing.
+Confirmed **not** a hazard for the actual correction math — `smoothed_lead_`
+and `error`, which drive every decision `observe()` makes, are computed from
+the untruncated `raw_lead`/its `float` cast, never from `lead_`. This is
+diagnostic-accessor corruption only: under a large desync, `clockLead()` (used
+by `tests/client/convergence_test.cpp` and intended for future telemetry/HUD
+use, per Task 9) can report a small or wrapped value for what is actually a
+huge gap. Real `ack_tick`/`server_tick` deltas are always small in practice
+(single/low-double-digit ticks), so this doesn't currently manifest; deferred
+as genuinely cosmetic rather than fixed now, since fixing it means deciding
+`lead()`'s saturation behavior for values that can't happen under any
+currently-reachable scenario. Revisit if `lead()` is ever surfaced to an
+operator-facing dashboard rather than a HUD number or a test assertion.
+
+**Deferred, not fixed (LOW) — `InputBuffer`'s window-ceiling arithmetic can
+wrap after ~2.3 years of continuous uptime.** `last_consumed_ + kInputBufferSlots`
+(`input_buffer.cpp`) is unguarded `uint32_t` addition; once `last_consumed_`
+is within 64 of `UINT32_MAX` the sum wraps to a small value, transiently (~1 s,
+self-recovering once `last_consumed_` itself wraps past it) rejecting
+legitimate near-future inputs. Not attacker-acceleratable — tick count is
+server-paced at 60 Hz, not attacker-influenced — so this is a long-uptime
+robustness note, not a security finding worth blocking on.
+
+**Noted, not fixed — `hits_` is also id-indexed and never reset on
+removal.** Pre-existing since the P2 tip commit, not a P3 regression: a player
+who inherits a reused id also inherits the departed occupant's cumulative hit
+count (`Server::hits(id)`). Same fix pattern (reset-on-reuse) as the `InputBuffer`
+finding above would apply; left as a follow-up rather than folded into this
+phase's fix, since it's cosmetic (a reported statistic, not a state that
+affects gameplay or authorization) and predates P3.
+
+**Verified unchanged (still deferred) — the three P2 CRITICAL findings.**
+`src/server/session.cpp`/`session.h` are byte-for-byte unchanged between the P2
+tip commit and this phase (confirmed by diff, not assumed). All three —
+spoofable session authorization, join/snapshot amplification, and
+session-table exhaustion — stand exactly as recorded in P2's section above.
+P3 adds no authentication and removes none; the input-buffering rewrite
+changes *when* an authorized input is applied, never *whether* authorization
+gates it.
+
+**Re-verified closed — the P1-deferred, P2-verified-closed endpoint↔player
+binding chokepoint.** Grepped every call site of `World::applyInput` across
+the whole tree after the P3 rewrite, rather than assuming the P2 verification
+survived it. Exactly two callers exist: `Server::tick()`'s pass 1
+(`src/server/server.h`), still reached only through `handleInput`'s
+unconditional `authorize()` gate — the buffering rewrite sits entirely
+downstream of the same chokepoint, not around it — and `Client::sendInput`/
+`Client::reconcile` (`src/client/client.h`), both applying only to `predicted_`,
+a client-local `sim::World` with no authority. Confirmed by tracing every use
+of `predicted_`: it feeds only local rendering (`localPosition`) and stats
+(`reconcile`'s error recording); nothing derived from it is ever sent —
+`sendInput` builds its outgoing `InputCommand` from the caller-supplied
+movement parameters, never from `predicted_`'s own state. This is the same
+distinction P2 recorded, now confirmed rather than waved at across a rewrite
+of the surrounding code.
+
+---
+
+<!-- Next section: P3 decisions, pivots, and remaining findings (Task 10) -->
