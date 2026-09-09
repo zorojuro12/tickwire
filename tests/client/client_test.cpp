@@ -252,21 +252,36 @@ TEST(ClientTest, SnapshotLeadErrorCorrectsTheClientClock) {
   c.tick(16);
   ASSERT_EQ(c.clientTick(), 503u);
 
-  // Lead 3, on target: a nominal +1 advance, no correction.
+  // Lead 3, on target: a nominal +1 advance, no correction. Also seeds
+  // ClockSync's EMA at this on-target value (its first observation).
   injectSnapshot(*tp, 500, 5000, twoPlayerSnapshot(500), 503);
   c.tick(32);
   EXPECT_EQ(c.clientTick(), 504u);
   EXPECT_EQ(c.clockLead(), 3);
 
-  // Lead 1, two short: a nominal +1 advance plus a +1 correction.
+  // A single, one-off short lead must not immediately flip the correction
+  // -- that is exactly the raw-signal behavior ClockSync's EMA+deadband
+  // exists to avoid (see clock_sync.h). Only a repeated, sustained
+  // deviation should eventually cross the deadband and correct.
   injectSnapshot(*tp, 501, 5016, twoPlayerSnapshot(501), 502);
   c.tick(48);
-  EXPECT_EQ(c.clientTick(), 506u);
+  EXPECT_EQ(c.clientTick(), 505u);  // nominal +1 only, no correction yet
 
-  // Lead 5, two long: a nominal +1 advance plus a -1 correction, netting 0.
-  injectSnapshot(*tp, 502, 5032, twoPlayerSnapshot(502), 507);
-  c.tick(64);
-  EXPECT_EQ(c.clientTick(), 506u);
+  uint32_t tick_before_loop = c.clientTick();
+  uint32_t server_tick = 502;
+  uint32_t send_ms = 5032;
+  bool corrected = false;
+  for (int i = 0; i < 20 && !corrected; ++i) {
+    injectSnapshot(*tp, server_tick, send_ms, twoPlayerSnapshot(server_tick), server_tick - 2);
+    const uint32_t before = c.clientTick();
+    c.tick(send_ms);
+    // Advanced by more than the nominal +1 means a correction fired.
+    if (c.clientTick() != before + 1) corrected = true;
+    ++server_tick;
+    send_ms += 16;
+  }
+  EXPECT_TRUE(corrected);
+  EXPECT_GT(c.clientTick(), tick_before_loop);  // corrected forward, matching the short-lead sign
 }
 
 TEST(ClientTest, ClockCorrectionNeverUnderflows) {

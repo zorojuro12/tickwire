@@ -65,6 +65,7 @@ tw_add_test(timer_test tests/server/timer_test.cpp)
 tw_add_test(client_test tests/client/client_test.cpp)
 tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
 tw_add_test(prediction_test tests/client/prediction_test.cpp)
+tw_add_test(convergence_test tests/client/convergence_test.cpp)
 tw_add_test(view_test tests/client/view_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")

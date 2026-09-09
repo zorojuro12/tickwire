@@ -164,7 +164,7 @@ class Client {
 
     switch (h.type) {
       case net::MsgType::kJoinAccept:
-        handleJoinAccept(r, h);
+        handleJoinAccept(r, h, now_ms);
         break;
       case net::MsgType::kLeave:
         if (state_ == State::kJoining && h.ack_seq == kJoinSeq) {
@@ -179,17 +179,33 @@ class Client {
     }
   }
 
-  void handleJoinAccept(net::ByteReader& r, const net::PacketHeader& h) noexcept {
+  void handleJoinAccept(net::ByteReader& r, const net::PacketHeader& h, uint32_t now_ms) noexcept {
     if (state_ != State::kJoining || h.ack_seq != kJoinSeq) return;
     uint32_t id = sim::kInvalidPlayerId;
     if (!net::decodeJoinAccept(r, id)) return;
     player_id_ = id;
     state_ = State::kJoined;
-    // Place the clock ahead of the server's reported tick, so the client's
-    // first input is stamped for a tick the server has not yet simulated.
-    // tick() increments tick_ before draining the transport (see tick()
-    // below), so this seed is not immediately clobbered by that increment.
-    tick_ = h.tick + static_cast<uint32_t>(kTargetLeadTicks);
+
+    // h.tick is the server's tick as of when it SENT the accept, not as of
+    // now -- under real network latency the server has already advanced
+    // further by the time this runs, AND every input this client sends
+    // from here on will separately spend its own one-way trip reaching
+    // the server, during which the server advances again by roughly the
+    // same amount. Both gaps are approximated by the join handshake's own
+    // round trip (send_time_ms of the last request to now_ms of this
+    // accept) taken in FULL, not halved: half covers "catch up to where
+    // the server is now", the other half covers "survive this input's own
+    // future transit". kTargetLeadTicks is added on top as the intended
+    // steady-state buffer margin, not a substitute for either gap.
+    // Without this, a client seeded only kTargetLeadTicks ahead sends
+    // every input already behind the server's InputBuffer window by the
+    // time it arrives -- and since correction only engages once at least
+    // one input is accepted (ack_tick != 0), a clock that starts this far
+    // behind has no way to recover on its own.
+    const uint32_t join_rtt_ms = now_ms >= last_join_send_ms_ ? now_ms - last_join_send_ms_ : 0;
+    const uint32_t join_rtt_ticks =
+        static_cast<uint32_t>((static_cast<uint64_t>(join_rtt_ms) * sim::kTickHz) / 1000u);
+    tick_ = h.tick + join_rtt_ticks + static_cast<uint32_t>(kTargetLeadTicks);
   }
 
   void handleSnapshot(net::ByteReader& r, const net::PacketHeader& h, uint32_t now_ms) noexcept {
@@ -265,6 +281,7 @@ class Client {
   }
 
   void sendJoinRequest(uint32_t now_ms) noexcept {
+    last_join_send_ms_ = now_ms;
     net::PacketHeader h;
     h.type = net::MsgType::kJoinRequest;
     h.seq = kJoinSeq;
@@ -294,6 +311,7 @@ class Client {
   uint32_t player_id_ = sim::kInvalidPlayerId;
   uint32_t tick_ = 0;
   uint32_t next_retry_tick_ = 0;
+  uint32_t last_join_send_ms_ = 0;
   uint32_t join_attempts_ = 0;
   uint32_t snapshots_received_ = 0;
   uint32_t latest_snapshot_tick_ = 0;

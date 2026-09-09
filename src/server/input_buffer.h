@@ -8,7 +8,20 @@
 
 namespace server {
 
-inline constexpr size_t kInputBufferSlots = 16;  // power of two; 266 ms of input at 60 Hz
+// Power of two; 1.067 s of input at 60 Hz. Must comfortably exceed the
+// clock-sync lead a real-latency client needs to bootstrap: at ~200 ms RTT
+// (P3's own headline demo scenario), the client's join-time clock seed
+// alone needs ~12 ticks of lead just to "catch up to now" (see
+// Client::handleJoinAccept), before kTargetLeadTicks is even added. A
+// narrower window (16, tried first) left too little headroom -- a single
+// overcorrection or jitter sample could push the client's stamped ticks
+// past the window's *upper* bound, and once that happens every subsequent
+// input is rejected for arriving "too far in the future," freezing
+// ack_tick while the server's own tick keeps rising. ClockSync reads that
+// as "too far behind" and pushes the clock further ahead in response --
+// a runaway positive-feedback loop in the wrong direction, discovered via
+// P3 Task 8's real-latency convergence test.
+inline constexpr size_t kInputBufferSlots = 64;
 inline constexpr uint32_t kInputBufferMask = kInputBufferSlots - 1;
 
 // Per-session, tick-keyed input storage. Pure: no I/O, no clock, no
