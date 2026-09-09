@@ -34,5 +34,26 @@ TEST(PendingInputsTest, RecordsByTickAndEvictsBeyondCapacity) {
   EXPECT_NE(p.find(5 + kPendingInputSlots), nullptr);
 }
 
+TEST(PredictionStatsTest, ReportsPercentilesOverTheRollingWindow) {
+  PredictionStats s;
+  EXPECT_EQ(s.samples(), 0u);
+  EXPECT_EQ(s.p50(), 0.0f);
+  EXPECT_EQ(s.p99(), 0.0f);
+  EXPECT_EQ(s.worst(), 0.0f);
+
+  for (int i = 1; i <= 100; ++i) s.record(static_cast<float>(i));
+  EXPECT_EQ(s.samples(), 100u);
+  EXPECT_EQ(s.p50(), 50.0f);
+  EXPECT_EQ(s.p99(), 99.0f);
+  EXPECT_EQ(s.worst(), 100.0f);
+
+  s.record(1000.0f);
+  for (int i = 0; i < 600; ++i) s.record(1.0f);
+  EXPECT_EQ(s.samples(), 701u);
+  EXPECT_EQ(s.p50(), 1.0f);
+  EXPECT_EQ(s.p99(), 1.0f);
+  EXPECT_EQ(s.worst(), 1000.0f);
+}
+
 }  // namespace
 }  // namespace client

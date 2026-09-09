@@ -29,4 +29,28 @@ class PendingInputs {
   std::array<bool, kPendingInputSlots> filled_{};
 };
 
+// The magnitude of each reconciliation correction, over a rolling window.
+// Fixed storage, no allocation; percentiles sort a stack copy on query,
+// which is a diagnostic path, never a per-tick one.
+//
+// Percentile convention: nearest-rank over the window's live entries --
+// sort the n live samples ascending and take index ceil(p/100 * n) - 1.
+class PredictionStats {
+ public:
+  static constexpr size_t kWindow = 512;  // ~25 s of snapshots at 20 Hz
+
+  void record(float error) noexcept;
+  uint32_t samples() const noexcept;  // total recorded, not window-capped
+  float p50() const noexcept;         // 0 when samples() == 0
+  float p99() const noexcept;         // 0 when samples() == 0
+  float worst() const noexcept;       // over all samples, not just the window
+
+ private:
+  float percentile(float p) const noexcept;
+
+  std::array<float, kWindow> window_{};
+  uint32_t count_ = 0;
+  float worst_ = 0.0f;
+};
+
 }  // namespace client
