@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 #include "client/clock_sync.h"
@@ -128,6 +129,8 @@ class Client {
   // "ping".
   uint32_t rttMs() const noexcept { return rtt_ms_; }
 
+  const PredictionStats& predictionError() const noexcept { return stats_; }
+
   // The local player's position: predicted when prediction is on and the
   // prediction world has been seeded, otherwise straight from the newest
   // snapshot. False when no snapshot has yet carried this player.
@@ -232,6 +235,18 @@ class Client {
   // carries the velocity setPlayerState/the previous replay step just
   // set, mirroring the server's own underrun-repeat semantics exactly.
   void reconcile(const sim::PlayerState& authoritative, uint32_t snapshot_tick) noexcept {
+    predicted_.writeSnapshot(predicted_scratch_);
+    for (uint32_t i = 0; i < predicted_scratch_.count; ++i) {
+      if (predicted_scratch_.players[i].id != player_id_) continue;
+      // std::hypot, not sqrt(dx*dx + dy*dy): avoids the intermediate
+      // overflow squaring two large-but-finite floats can produce -- the
+      // same hazard the P2 security review found in World::resolveHitscan.
+      const float dx = predicted_scratch_.players[i].x - authoritative.x;
+      const float dy = predicted_scratch_.players[i].y - authoritative.y;
+      stats_.record(std::hypot(dx, dy));
+      break;
+    }
+
     predicted_.setPlayerState(authoritative);
 
     const uint32_t last_sent = tick_ - 1;
@@ -290,6 +305,7 @@ class Client {
   bool predicted_ready_ = false;
   bool prediction_enabled_ = true;
   uint32_t rtt_ms_ = 0;
+  PredictionStats stats_;
   mutable sim::WorldSnapshot predicted_scratch_{};
 };
 

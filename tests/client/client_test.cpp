@@ -433,6 +433,25 @@ TEST(ClientTest, ReconciliationReplaysUnacknowledgedInputs) {
   EXPECT_EQ(x, 2.0f * sim::kMoveSpeed * sim::kTickDt);
 }
 
+TEST(ClientTest, ReconciliationRecordsThePreCorrectionError) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  injectSnapshot(*tp, 500, 5000, onePlayerSnapshot(500, 0.0f, 0.0f, 0.0f, 0.0f), 503);
+  c.tick(32);
+  EXPECT_EQ(c.predictionError().samples(), 0u);
+
+  // Predicted stayed at (0, 0) (no sendInput was ever called); authority
+  // places it at (3, 4) -- a 3-4-5 triangle, correction magnitude 5.0f.
+  injectSnapshot(*tp, 501, 5016, onePlayerSnapshot(501, 3.0f, 4.0f, 0.0f, 0.0f), 503);
+  c.tick(48);
+  EXPECT_EQ(c.predictionError().samples(), 1u);
+  EXPECT_EQ(c.predictionError().worst(), 5.0f);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);
