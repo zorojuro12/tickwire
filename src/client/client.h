@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "client/clock_sync.h"
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
@@ -94,6 +95,7 @@ class Client {
   uint32_t serverTimeMs() const noexcept { return server_time_ms_; }
   uint32_t snapshotsReceived() const noexcept { return snapshots_received_; }
   uint32_t joinAttempts() const noexcept { return join_attempts_; }
+  uint32_t clientTick() const noexcept { return tick_; }
 
  private:
   void handlePacket(const net::PacketSlot& slot) noexcept {
@@ -124,6 +126,11 @@ class Client {
     if (!net::decodeJoinAccept(r, id)) return;
     player_id_ = id;
     state_ = State::kJoined;
+    // Place the clock ahead of the server's reported tick, so the client's
+    // first input is stamped for a tick the server has not yet simulated.
+    // tick() increments tick_ before draining the transport (see tick()
+    // below), so this seed is not immediately clobbered by that increment.
+    tick_ = h.tick + static_cast<uint32_t>(kTargetLeadTicks);
   }
 
   void handleSnapshot(net::ByteReader& r, const net::PacketHeader& h) noexcept {

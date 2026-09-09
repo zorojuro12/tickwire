@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "client/clock_sync.h"
 #include "net/framing.h"
 #include "net/loopback.h"
 #include "net/protocol.h"
@@ -21,13 +22,15 @@ using testsupport::RecordingTransport;
 
 constexpr net::Endpoint kServerEp{0x7F000001u, 0x3000u};
 
-void injectJoinAccept(RecordingTransport& tp, uint32_t player_id, uint16_t ack_seq) {
+void injectJoinAccept(RecordingTransport& tp, uint32_t player_id, uint16_t ack_seq,
+                       uint32_t tick = 0) {
   std::array<std::byte, net::kJoinAcceptBytes> payload{};
   net::ByteWriter pw(payload);
   ASSERT_TRUE(net::encodeJoinAccept(player_id, pw));
   net::PacketHeader h;
   h.type = net::MsgType::kJoinAccept;
   h.ack_seq = ack_seq;
+  h.tick = tick;
   std::array<std::byte, net::kMaxPacket> buf{};
   const size_t written = net::framePacket(h, payload, buf);
   ASSERT_GT(written, 0u);
@@ -111,6 +114,19 @@ TEST(ClientTest, AcceptanceStopsRetransmissionAndAssignsTheId) {
   const size_t sent_before = tp->sentCount();
   for (int i = 0; i < 60; ++i) c.tick(32 + static_cast<uint32_t>(i) * 16);
   EXPECT_EQ(tp->sentCount(), sent_before);
+}
+
+TEST(ClientTest, JoinAcceptSeedsTheClockAheadOfTheServer) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  EXPECT_EQ(c.state(), State::kJoined);
+  EXPECT_EQ(c.playerId(), 1u);
+  EXPECT_EQ(c.clientTick(), 500u + static_cast<uint32_t>(kTargetLeadTicks));
 }
 
 TEST(ClientTest, MismatchedAckIsIgnored) {
