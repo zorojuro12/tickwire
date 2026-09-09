@@ -224,6 +224,62 @@ TEST(ServerTest, InputAppliesAtItsStampedTickNotOnArrival) {
   EXPECT_EQ(findP1->x, -35.0f + sim::kMoveSpeed * sim::kTickDt);
 }
 
+TEST(ServerTest, MissingInputRepeatsTheLastVelocity) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2051u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);  // world at tick 1
+
+  auto findP1 = [&] {
+    sim::WorldSnapshot snap{};
+    srv->world().writeSnapshot(snap);
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == 1) return snap.players[i];
+    }
+    return sim::PlayerState{};
+  };
+
+  // Accumulated the same way World::step() does (repeated += vx*dt, not a
+  // closed-form multiplication) -- three separate additions round
+  // differently than one multiplication by 3 under IEEE-754, even though
+  // both print as the same value.
+  float expected_x = -35.0f;
+
+  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false, 2);
+  srv->ingest();
+  srv->tick(16);  // simulates tick 2 -- input applies
+  expected_x = expected_x + sim::kMoveSpeed * sim::kTickDt;
+  {
+    sim::PlayerState p1 = findP1();
+    EXPECT_EQ(p1.vx, sim::kMoveSpeed);
+    EXPECT_EQ(p1.x, expected_x);
+  }
+
+  const uint64_t underruns_before = srv->inputUnderruns();
+  srv->tick(32);  // simulates tick 3 -- no input; repeats last velocity
+  expected_x = expected_x + sim::kMoveSpeed * sim::kTickDt;
+  srv->tick(48);  // simulates tick 4 -- same
+  expected_x = expected_x + sim::kMoveSpeed * sim::kTickDt;
+  {
+    sim::PlayerState p1 = findP1();
+    EXPECT_EQ(p1.vx, sim::kMoveSpeed);
+    EXPECT_EQ(p1.x, expected_x);
+  }
+  EXPECT_EQ(srv->inputUnderruns(), underruns_before + 2);
+
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 5);
+  srv->ingest();
+  srv->tick(64);  // simulates tick 5 -- explicit stop is honored
+  {
+    sim::PlayerState p1 = findP1();
+    EXPECT_EQ(p1.vx, 0.0f);
+    EXPECT_EQ(p1.x, expected_x);  // unchanged: this tick's velocity is 0
+  }
+}
+
 TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
   auto tp = std::make_unique<RecordingTransport>();
   auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
