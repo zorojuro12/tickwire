@@ -23,5 +23,18 @@ TEST(ClockSyncTest, CorrectionFollowsTheLeadErrorAndClearsOnRead) {
   EXPECT_EQ(c.takeCorrection(), -1);
 }
 
+TEST(ClockSyncTest, SnapshotWithNoAcknowledgedInputIsIgnored) {
+  ClockSync c;
+  c.observe(500, 0);
+  EXPECT_FALSE(c.haveEstimate());
+  EXPECT_EQ(c.takeCorrection(), 0);
+  EXPECT_EQ(c.lead(), 0);
+
+  c.observe(500, 503);
+  EXPECT_TRUE(c.haveEstimate());
+  EXPECT_EQ(c.lead(), 3);
+  EXPECT_EQ(c.takeCorrection(), 0);
+}
+
 }  // namespace
 }  // namespace client

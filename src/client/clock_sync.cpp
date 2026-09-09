@@ -3,6 +3,8 @@
 namespace client {
 
 void ClockSync::observe(uint32_t server_tick, uint32_t ack_tick) noexcept {
+  if (ack_tick == 0) return;
+
   const int64_t lead = static_cast<int64_t>(ack_tick) - static_cast<int64_t>(server_tick);
   const int64_t error = lead - kTargetLeadTicks;
   lead_ = static_cast<int32_t>(lead);
