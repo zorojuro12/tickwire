@@ -98,18 +98,13 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     if (IsKeyDown(KEY_W)) move_y += 1.0f;
     if (IsKeyDown(KEY_S)) move_y -= 1.0f;
 
+    if (IsKeyPressed(KEY_P)) {
+      client->setPredictionEnabled(!client->predictionEnabled());
+    }
+
     const sim::WorldSnapshot& snap = client->latestSnapshot();
     float local_x = 0.0f, local_y = 0.0f;
-    bool have_local = false;
-    if (client->playerId() != sim::kInvalidPlayerId) {
-      for (uint32_t i = 0; i < snap.count; ++i) {
-        if (snap.players[i].id == client->playerId()) {
-          local_x = snap.players[i].x;
-          local_y = snap.players[i].y;
-          have_local = true;
-        }
-      }
-    }
+    const bool have_local = client->localPosition(local_x, local_y);
 
     const Vector2 mouse = GetMousePosition();
     const float scale = kSide / (2.0f * sim::kArenaHalf);
@@ -126,16 +121,31 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     ClearBackground(BLACK);
     DrawRectangleLines(0, 0, static_cast<int>(kSide), static_cast<int>(kSide), RAYWHITE);
 
+    // Remote players come straight from the snapshot -- prediction is
+    // local-player-only. The local player is drawn separately, from
+    // localPosition(), which is predicted when prediction is on and the
+    // raw snapshot position when it's off.
     for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id == client->playerId()) continue;
       const client::ScreenPos sp =
           client::worldToScreen(snap.players[i].x, snap.players[i].y, kSide, 0.0f, 0.0f);
       const float r = client::worldToScreenRadius(snap.players[i].radius, kSide);
-      const Color color = (snap.players[i].id == client->playerId()) ? GREEN : RED;
+      DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, RED);
+    }
+
+    if (have_local) {
+      const client::ScreenPos sp = client::worldToScreen(local_x, local_y, kSide, 0.0f, 0.0f);
+      const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide);
+      // Green while predicting, yellow while not -- the toggle's state is
+      // visible without reading the HUD.
+      const Color color = client->predictionEnabled() ? GREEN : YELLOW;
       DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, color);
     }
 
-    DrawText(TextFormat("tick=%u latency=%ums players=%u", client->latestSnapshotTick(),
-                          latency_ms, snap.count),
+    DrawText(TextFormat("tick=%u latency=%ums players=%u pred=%s rtt=%ums lead=%d err_p99=%.2f",
+                          client->latestSnapshotTick(), latency_ms, snap.count,
+                          client->predictionEnabled() ? "on" : "off", client->rttMs(),
+                          client->clockLead(), client->predictionError().p99()),
               10, 10, 20, RAYWHITE);
     EndDrawing();
   }
