@@ -103,7 +103,12 @@ target_link_libraries(tw_loadclient PRIVATE libclient libserver)
 add_test(NAME e2e_udp
   COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
           "$<TARGET_FILE:tw_server>" "$<TARGET_FILE:tw_loadclient>")
-set_tests_properties(e2e_udp PROPERTIES PASS_REGULAR_EXPRESSION "joined=4")
+# No PASS_REGULAR_EXPRESSION: CTest treats that property as the SOLE
+# pass/fail signal once set, ignoring the process exit code entirely -- a
+# script-level `exit 1` (e.g. the lead= check below) would be silently
+# overridden by a regex match elsewhere in the output. Exit code alone
+# (set -e/pipefail in the script, plus tw_loadclient's own
+# joined==players return value) is the pass/fail signal here.
 
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)

@@ -106,6 +106,19 @@ int main(int argc, char** argv) {
 
   std::printf("joined=%u\n", joined);
   std::printf("snapshots=%u\n", snapshots_total);
+
+  // "underruns" (an InputBuffer/server-side concept) isn't something
+  // Client<T> tracks; snaps -- corrections large enough to cross
+  // ClockSync's snap threshold -- is the closest genuinely client-side
+  // signal of how much the clock struggled to settle, so it stands in
+  // for that field.
+  for (uint32_t i = 0; i < players; ++i) {
+    const client::Client<net::UdpTransport>& c = *clients[i];
+    std::printf(
+        "player=%u rtt_ms=%u lead=%d pred_p50=%.2f pred_p99=%.2f pred_worst=%.2f snaps=%u\n",
+        c.playerId(), c.rttMs(), c.clockLead(), c.predictionError().p50(),
+        c.predictionError().p99(), c.predictionError().worst(), c.clockSnaps());
+  }
   std::fflush(stdout);
 
   return joined == players ? 0 : 1;
