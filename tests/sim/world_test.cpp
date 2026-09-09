@@ -423,5 +423,37 @@ TEST(WorldTest, SetPlayerStateOverwritesPositionAndVelocity) {
   EXPECT_EQ(after->x, 10.0f + sim::kMoveSpeed * sim::kTickDt);
 }
 
+TEST(WorldTest, SetPlayerStateRejectsUnknownIdsAndNonFiniteFields) {
+  auto w = std::make_unique<World>();
+  ASSERT_TRUE(w->addPlayer(7, 3.0f, 4.0f));
+
+  auto assertUnchanged = [&] {
+    auto p = snapshotFor(*w, 7);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->x, 3.0f);
+    EXPECT_EQ(p->y, 4.0f);
+    EXPECT_EQ(p->vx, 0.0f);
+    EXPECT_EQ(p->vy, 0.0f);
+  };
+
+  const float nan = std::nanf("");
+  const float inf = std::numeric_limits<float>::infinity();
+
+  EXPECT_FALSE(w->setPlayerState(PlayerState{8, 1, 1, 1, 1, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{0, 1, 1, 1, 1, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{7, nan, 1, 1, 1, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{7, 1, inf, 1, 1, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{7, 1, 1, nan, 1, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{7, 1, 1, 1, -inf, sim::kPlayerRadius}));
+  assertUnchanged();
+  EXPECT_FALSE(w->setPlayerState(PlayerState{7, 1, 1, 1, 1, nan}));
+  assertUnchanged();
+}
+
 }  // namespace
 }  // namespace sim
