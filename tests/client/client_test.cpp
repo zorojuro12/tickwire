@@ -318,6 +318,36 @@ TEST(ClientTest, SendInputMovesTheLocalPlayerWithoutWaitingForASnapshot) {
   EXPECT_EQ(y, 20.0f);
 }
 
+TEST(ClientTest, PredictionOffRendersTheSnapshotPosition) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  c.setPredictionEnabled(false);
+  EXPECT_FALSE(c.predictionEnabled());
+
+  injectSnapshot(*tp, 500, 5000, onePlayerSnapshot(500, 10.0f, 20.0f, 0.0f, 0.0f), 503);
+  c.tick(32);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 10.0f);
+  EXPECT_EQ(y, 20.0f);
+
+  EXPECT_TRUE(c.sendInput(48, 1.0f, 0.0f, 0.0f, 0.0f, false));
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 10.0f);
+  EXPECT_EQ(y, 20.0f);
+
+  c.setPredictionEnabled(true);
+  EXPECT_TRUE(c.sendInput(64, 1.0f, 0.0f, 0.0f, 0.0f, false));
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 10.0f + sim::kMoveSpeed * sim::kTickDt);
+  EXPECT_EQ(y, 20.0f);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);

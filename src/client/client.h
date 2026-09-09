@@ -109,12 +109,13 @@ class Client {
   int32_t clockLead() const noexcept { return clock_.lead(); }
   uint32_t clockSnaps() const noexcept { return clock_.snaps(); }
 
-  void setPredictionEnabled(bool on) noexcept {
-    prediction_enabled_ = on;
-    // Re-seed from authority on the next snapshot rather than resuming a
-    // stale prediction world.
-    if (on) predicted_ready_ = false;
-  }
+  // A pure toggle: the prediction world is seeded once (on the first
+  // snapshot that carries this player, in handleSnapshot below) and simply
+  // stops or resumes receiving new inputs as this flips. It is not reset,
+  // so re-enabling resumes from wherever it already sits rather than
+  // waiting on another snapshot -- Task 7's reconciliation is what keeps it
+  // synced to authority going forward.
+  void setPredictionEnabled(bool on) noexcept { prediction_enabled_ = on; }
   bool predictionEnabled() const noexcept { return prediction_enabled_; }
 
   // The local player's position: predicted when prediction is on and the
