@@ -159,8 +159,13 @@ class Client {
     sendFramed(h, {});
   }
 
+  // Saturates at 0 rather than wrapping -- c is bounded by
+  // ClockSync::kMaxCorrectionTicks, but t - (-c) can still underflow a
+  // uint32_t early after a join.
   static uint32_t applyCorrection(uint32_t t, int32_t c) noexcept {
-    return static_cast<uint32_t>(static_cast<int64_t>(t) + c);
+    if (c >= 0) return t + static_cast<uint32_t>(c);
+    const uint32_t magnitude = static_cast<uint32_t>(-static_cast<int64_t>(c));
+    return t < magnitude ? 0u : t - magnitude;
   }
 
   bool sendFramed(net::PacketHeader h, std::span<const std::byte> payload) noexcept {

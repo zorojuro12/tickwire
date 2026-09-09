@@ -269,6 +269,23 @@ TEST(ClientTest, SnapshotLeadErrorCorrectsTheClientClock) {
   EXPECT_EQ(c.clientTick(), 506u);
 }
 
+TEST(ClientTest, ClockCorrectionNeverUnderflows) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 0);
+  c.tick(16);
+  ASSERT_EQ(c.clientTick(), 3u);
+
+  // Lead 19, error +16: a snap demanding a correction of -16 against a
+  // clock reading 4 after tick()'s nominal +1.
+  injectSnapshot(*tp, 1, 5016, twoPlayerSnapshot(1), 20);
+  c.tick(32);
+
+  EXPECT_LT(c.clientTick(), 1000u);
+  EXPECT_EQ(c.clientTick(), 0u);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);
