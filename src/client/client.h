@@ -46,6 +46,8 @@ class Client {
       handlePacket(slot);
     }
 
+    tick_ = applyCorrection(tick_, clock_.takeCorrection());
+
     if (state_ == State::kJoining && tick_ >= next_retry_tick_) {
       if (join_attempts_ >= kJoinMaxAttempts) {
         state_ = State::kFailed;
@@ -96,6 +98,8 @@ class Client {
   uint32_t snapshotsReceived() const noexcept { return snapshots_received_; }
   uint32_t joinAttempts() const noexcept { return join_attempts_; }
   uint32_t clientTick() const noexcept { return tick_; }
+  int32_t clockLead() const noexcept { return clock_.lead(); }
+  uint32_t clockSnaps() const noexcept { return clock_.snaps(); }
 
  private:
   void handlePacket(const net::PacketSlot& slot) noexcept {
@@ -144,6 +148,7 @@ class Client {
     snapshot_ = snap;
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;
+    clock_.observe(h.tick, h.ack_tick);
   }
 
   void sendJoinRequest(uint32_t now_ms) noexcept {
@@ -152,6 +157,10 @@ class Client {
     h.seq = kJoinSeq;
     h.send_time_ms = now_ms;
     sendFramed(h, {});
+  }
+
+  static uint32_t applyCorrection(uint32_t t, int32_t c) noexcept {
+    return static_cast<uint32_t>(static_cast<int64_t>(t) + c);
   }
 
   bool sendFramed(net::PacketHeader h, std::span<const std::byte> payload) noexcept {
@@ -172,6 +181,7 @@ class Client {
   uint32_t latest_snapshot_tick_ = 0;
   uint32_t server_time_ms_ = 0;
   sim::WorldSnapshot snapshot_{};
+  ClockSync clock_;
 };
 
 }  // namespace client

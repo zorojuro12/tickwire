@@ -219,7 +219,7 @@ TEST(ClientTest, JunkPacketsAreIgnored) {
 }
 
 void injectSnapshot(RecordingTransport& tp, uint32_t tick, uint32_t send_time_ms,
-                     const sim::WorldSnapshot& snap) {
+                     const sim::WorldSnapshot& snap, uint32_t ack_tick = 0) {
   std::array<std::byte, net::kMaxPacket> payload{};
   net::ByteWriter pw(payload);
   ASSERT_TRUE(net::encodeSnapshot(snap, pw));
@@ -227,6 +227,7 @@ void injectSnapshot(RecordingTransport& tp, uint32_t tick, uint32_t send_time_ms
   h.type = net::MsgType::kSnapshot;
   h.tick = tick;
   h.send_time_ms = send_time_ms;
+  h.ack_tick = ack_tick;
   std::array<std::byte, net::kMaxPacket> buf{};
   const size_t written =
       net::framePacket(h, std::span<const std::byte>(payload).subspan(0, pw.size()), buf);
@@ -241,6 +242,31 @@ sim::WorldSnapshot twoPlayerSnapshot(uint32_t tick) {
   s.players[0] = {.id = 1, .x = 1.0f, .y = 2.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
   s.players[1] = {.id = 2, .x = -3.0f, .y = 4.0f, .vx = 1.0f, .vy = -1.0f, .radius = 0.5f};
   return s;
+}
+
+TEST(ClientTest, SnapshotLeadErrorCorrectsTheClientClock) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+  ASSERT_EQ(c.clientTick(), 503u);
+
+  // Lead 3, on target: a nominal +1 advance, no correction.
+  injectSnapshot(*tp, 500, 5000, twoPlayerSnapshot(500), 503);
+  c.tick(32);
+  EXPECT_EQ(c.clientTick(), 504u);
+  EXPECT_EQ(c.clockLead(), 3);
+
+  // Lead 1, two short: a nominal +1 advance plus a +1 correction.
+  injectSnapshot(*tp, 501, 5016, twoPlayerSnapshot(501), 502);
+  c.tick(48);
+  EXPECT_EQ(c.clientTick(), 506u);
+
+  // Lead 5, two long: a nominal +1 advance plus a -1 correction, netting 0.
+  injectSnapshot(*tp, 502, 5032, twoPlayerSnapshot(502), 507);
+  c.tick(64);
+  EXPECT_EQ(c.clientTick(), 506u);
 }
 
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
