@@ -348,6 +348,28 @@ TEST(ClientTest, PredictionOffRendersTheSnapshotPosition) {
   EXPECT_EQ(y, 20.0f);
 }
 
+TEST(ClientTest, RttComesFromTheAcknowledgedInputsSendTime) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+  ASSERT_EQ(c.clientTick(), 503u);
+  EXPECT_EQ(c.rttMs(), 0u);
+
+  // Stamped tick 503, sent at ms=100.
+  ASSERT_TRUE(c.sendInput(100, 1.0f, 0.0f, 0.0f, 0.0f, false));
+
+  injectSnapshot(*tp, 500, 5016, onePlayerSnapshot(500, 0.0f, 0.0f, 0.0f, 0.0f), 503);
+  c.tick(180);
+  EXPECT_EQ(c.rttMs(), 80u);
+
+  // An unmatched ack updates nothing.
+  injectSnapshot(*tp, 501, 5032, onePlayerSnapshot(501, 0.0f, 0.0f, 0.0f, 0.0f), 999);
+  c.tick(196);
+  EXPECT_EQ(c.rttMs(), 80u);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);

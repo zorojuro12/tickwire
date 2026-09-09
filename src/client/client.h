@@ -44,7 +44,7 @@ class Client {
 
     net::PacketSlot slot;
     while (transport_.tryReceive(slot)) {
-      handlePacket(slot);
+      handlePacket(slot, now_ms);
     }
 
     tick_ = applyCorrection(tick_, clock_.takeCorrection());
@@ -118,6 +118,16 @@ class Client {
   void setPredictionEnabled(bool on) noexcept { prediction_enabled_ = on; }
   bool predictionEnabled() const noexcept { return prediction_enabled_; }
 
+  // Input-to-snapshot latency: the time from sending an input to the
+  // snapshot that acknowledges it. This is NOT a pure network round trip --
+  // it includes however long the server's InputBuffer held the input before
+  // consuming it (up to kTargetLeadTicks worth) and the snapshot interval
+  // (kSnapshotIntervalTicks), so it reads roughly 50-100 ms above the wire
+  // RTT at 60 Hz. That is the number that matches what a player actually
+  // feels, which is why it is the one shown -- but it must not be labelled
+  // "ping".
+  uint32_t rttMs() const noexcept { return rtt_ms_; }
+
   // The local player's position: predicted when prediction is on and the
   // prediction world has been seeded, otherwise straight from the newest
   // snapshot. False when no snapshot has yet carried this player.
@@ -144,7 +154,7 @@ class Client {
   }
 
  private:
-  void handlePacket(const net::PacketSlot& slot) noexcept {
+  void handlePacket(const net::PacketSlot& slot, uint32_t now_ms) noexcept {
     net::ByteReader r(std::span<const std::byte>(slot.data).subspan(0, slot.len));
     net::PacketHeader h;
     if (!net::decodeHeader(r, h)) return;
@@ -159,7 +169,7 @@ class Client {
         }
         break;
       case net::MsgType::kSnapshot:
-        handleSnapshot(r, h);
+        handleSnapshot(r, h, now_ms);
         break;
       default:
         break;
@@ -179,7 +189,7 @@ class Client {
     tick_ = h.tick + static_cast<uint32_t>(kTargetLeadTicks);
   }
 
-  void handleSnapshot(net::ByteReader& r, const net::PacketHeader& h) noexcept {
+  void handleSnapshot(net::ByteReader& r, const net::PacketHeader& h, uint32_t now_ms) noexcept {
     sim::WorldSnapshot snap{};
     if (!net::decodeSnapshot(r, snap)) return;
     ++snapshots_received_;
@@ -191,6 +201,15 @@ class Client {
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;
     clock_.observe(h.tick, h.ack_tick);
+
+    // ack_tick names an input this client sent and (if still pending) still
+    // holds the send time for -- RTT is a subtraction, no wire round trip
+    // needed. now_ms >= send_time_ms is required: send_time_ms is derived
+    // from an attacker-influenced ack_tick, and an unguarded unsigned
+    // subtraction would report a ~4-billion-ms round trip.
+    if (const PendingInput* p = pending_.find(h.ack_tick); p != nullptr && now_ms >= p->send_time_ms) {
+      rtt_ms_ = now_ms - p->send_time_ms;
+    }
 
     if (!predicted_ready_) {
       for (uint32_t i = 0; i < snap.count; ++i) {
@@ -243,6 +262,7 @@ class Client {
   PendingInputs pending_;
   bool predicted_ready_ = false;
   bool prediction_enabled_ = true;
+  uint32_t rtt_ms_ = 0;
   mutable sim::WorldSnapshot predicted_scratch_{};
 };
 
