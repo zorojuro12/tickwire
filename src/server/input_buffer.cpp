@@ -6,6 +6,7 @@ bool InputBuffer::push(const sim::InputCommand& in) noexcept {
   const uint32_t i = in.tick & kInputBufferMask;
   slots_[i] = in;
   filled_[i] = true;
+  if (in.tick > highest_tick_) highest_tick_ = in.tick;
   return true;
 }
 
@@ -16,5 +17,7 @@ bool InputBuffer::takeFor(uint32_t tick, sim::InputCommand& out) noexcept {
   filled_[i] = false;
   return hit;
 }
+
+uint32_t InputBuffer::highestTick() const noexcept { return highest_tick_; }
 
 }  // namespace server

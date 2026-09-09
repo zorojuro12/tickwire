@@ -29,5 +29,22 @@ TEST(InputBufferTest, TakeForReturnsTheInputStampedForThatTick) {
   EXPECT_FALSE(b.takeFor(5, out));
 }
 
+TEST(InputBufferTest, HighestTickTracksTheNewestAcceptedInput) {
+  InputBuffer b;
+  EXPECT_EQ(b.highestTick(), 0u);
+
+  EXPECT_TRUE(b.push(sim::InputCommand{
+      .player_id = 1, .tick = 3, .move_x = 0, .move_y = 0, .aim_x = 0, .aim_y = 0, .fire = false}));
+  EXPECT_TRUE(b.push(sim::InputCommand{
+      .player_id = 1, .tick = 7, .move_x = 0, .move_y = 0, .aim_x = 0, .aim_y = 0, .fire = false}));
+  EXPECT_TRUE(b.push(sim::InputCommand{
+      .player_id = 1, .tick = 5, .move_x = 0, .move_y = 0, .aim_x = 0, .aim_y = 0, .fire = false}));
+  EXPECT_EQ(b.highestTick(), 7u);
+
+  sim::InputCommand out{};
+  EXPECT_TRUE(b.takeFor(7, out));
+  EXPECT_EQ(b.highestTick(), 7u);
+}
+
 }  // namespace
 }  // namespace server

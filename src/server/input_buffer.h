@@ -23,9 +23,12 @@ class InputBuffer {
   // Returns false on an underrun -- no input is held for that tick.
   bool takeFor(uint32_t tick, sim::InputCommand& out) noexcept;
 
+  uint32_t highestTick() const noexcept;  // highest accepted tick; 0 when none
+
  private:
   std::array<sim::InputCommand, kInputBufferSlots> slots_{};
   std::array<bool, kInputBufferSlots> filled_{};
+  uint32_t highest_tick_ = 0;
 };
 
 }  // namespace server
