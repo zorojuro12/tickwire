@@ -36,5 +36,25 @@ TEST(ClockSyncTest, SnapshotWithNoAcknowledgedInputIsIgnored) {
   EXPECT_EQ(c.takeCorrection(), 0);
 }
 
+TEST(ClockSyncTest, LargeErrorsSnapAndAreClamped) {
+  ClockSync c;
+
+  c.observe(100, 120);
+  EXPECT_EQ(c.takeCorrection(), -17);
+  EXPECT_EQ(c.snaps(), 1u);
+
+  c.observe(100, 80);
+  EXPECT_EQ(c.takeCorrection(), 23);
+  EXPECT_EQ(c.snaps(), 2u);
+
+  c.observe(1000, 900);
+  EXPECT_EQ(c.takeCorrection(), kMaxCorrectionTicks);
+  EXPECT_EQ(c.snaps(), 3u);
+
+  c.observe(100, 111);
+  EXPECT_EQ(c.takeCorrection(), -1);
+  EXPECT_EQ(c.snaps(), 3u);
+}
+
 }  // namespace
 }  // namespace client

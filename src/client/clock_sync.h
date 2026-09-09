@@ -21,11 +21,13 @@ class ClockSync {
 
   bool haveEstimate() const noexcept;  // has any snapshot been observed?
   int32_t lead() const noexcept;       // last observed ack_tick - server_tick
+  uint32_t snaps() const noexcept;     // corrections that crossed kSnapErrorTicks
 
  private:
   bool have_ = false;
   int32_t lead_ = 0;
   int32_t pending_ = 0;
+  uint32_t snaps_ = 0;
 };
 
 }  // namespace client

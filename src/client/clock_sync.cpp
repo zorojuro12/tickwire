@@ -9,7 +9,14 @@ void ClockSync::observe(uint32_t server_tick, uint32_t ack_tick) noexcept {
   const int64_t error = lead - kTargetLeadTicks;
   lead_ = static_cast<int32_t>(lead);
   have_ = true;
-  if (error == 0) {
+
+  if (error >= kSnapErrorTicks || error <= -kSnapErrorTicks) {
+    int64_t correction = -error;
+    if (correction > kMaxCorrectionTicks) correction = kMaxCorrectionTicks;
+    if (correction < -kMaxCorrectionTicks) correction = -kMaxCorrectionTicks;
+    pending_ = static_cast<int32_t>(correction);
+    ++snaps_;
+  } else if (error == 0) {
     pending_ = 0;
   } else if (error > 0) {
     pending_ = -1;
@@ -27,5 +34,7 @@ int32_t ClockSync::takeCorrection() noexcept {
 bool ClockSync::haveEstimate() const noexcept { return have_; }
 
 int32_t ClockSync::lead() const noexcept { return lead_; }
+
+uint32_t ClockSync::snaps() const noexcept { return snaps_; }
 
 }  // namespace client
