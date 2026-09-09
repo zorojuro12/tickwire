@@ -370,6 +370,69 @@ TEST(ClientTest, RttComesFromTheAcknowledgedInputsSendTime) {
   EXPECT_EQ(c.rttMs(), 80u);
 }
 
+// ack_tick is chosen as h.tick + kTargetLeadTicks throughout, keeping the
+// clock's lead exactly on target so ClockSync never issues a correction --
+// which keeps tick_'s progression purely nominal (+1 per tick() call) and
+// the tick arithmetic below fully predictable.
+TEST(ClientTest, ReconciliationReplaysUnacknowledgedInputs) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+  ASSERT_EQ(c.clientTick(), 503u);
+
+  injectSnapshot(*tp, 500, 5000, onePlayerSnapshot(500, 0.0f, 0.0f, 0.0f, 0.0f), 503);
+  c.tick(32);  // tick_ 503 -> 504, on-target lead, no correction
+  ASSERT_EQ(c.clientTick(), 504u);
+
+  ASSERT_TRUE(c.sendInput(48, 1.0f, 0.0f, 0.0f, 0.0f, false));  // stamps 504
+  c.tick(64);                                                   // -> 505
+  ASSERT_TRUE(c.sendInput(80, 1.0f, 0.0f, 0.0f, 0.0f, false));  // stamps 505
+  c.tick(96);                                                   // -> 506
+  ASSERT_TRUE(c.sendInput(112, 1.0f, 0.0f, 0.0f, 0.0f, false));  // stamps 506
+  ASSERT_EQ(c.clientTick(), 506u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 3.0f * sim::kMoveSpeed * sim::kTickDt);
+
+  // Authoritative snapshot at tick 504 (the server has consumed only that
+  // one), lead kept on target -> ack_tick = 504 + kTargetLeadTicks = 507.
+  // Player 1 is placed far from the predicted position on purpose (but
+  // inside the arena -- World::step() clamps to +/-49.5, which 100.0f
+  // would immediately hit on the first replayed step, masking the real
+  // assertion), so a wrong reconciliation (e.g. not adopting authority, or
+  // replaying the wrong range) is unmistakable.
+  injectSnapshot(*tp, 504, 5048, onePlayerSnapshot(504, 20.0f, 0.0f, sim::kMoveSpeed, 0.0f),
+                 504 + static_cast<uint32_t>(kTargetLeadTicks));
+  c.tick(128);  // tick_ 506 -> 507; replay range is (504, 506] = {505, 506}
+  ASSERT_EQ(c.clientTick(), 507u);
+
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 20.0f + 2.0f * sim::kMoveSpeed * sim::kTickDt);
+  EXPECT_EQ(y, 0.0f);
+
+  // Gap: advance past tick 507 with no input sent for it, then send one
+  // for 508.
+  c.tick(144);  // tick_ 507 -> 508, no sendInput for 507
+  ASSERT_EQ(c.clientTick(), 508u);
+  ASSERT_TRUE(c.sendInput(160, 1.0f, 0.0f, 0.0f, 0.0f, false));  // stamps 508
+
+  // Authoritative snapshot at tick 506, ack_tick = 506 + 3 = 509 (on
+  // target again). Player 1 reset to the origin with kMoveSpeed already
+  // latched in x, so the replay range (506, 508] = {507, 508} exercises
+  // both a miss (507: velocity carries from the authoritative state) and
+  // a hit (508: the input just sent).
+  injectSnapshot(*tp, 506, 5064, onePlayerSnapshot(506, 0.0f, 0.0f, sim::kMoveSpeed, 0.0f),
+                 506 + static_cast<uint32_t>(kTargetLeadTicks));
+  c.tick(176);  // tick_ 508 -> 509
+  ASSERT_EQ(c.clientTick(), 509u);
+
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 2.0f * sim::kMoveSpeed * sim::kTickDt);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);

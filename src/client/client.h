@@ -211,14 +211,41 @@ class Client {
       rtt_ms_ = now_ms - p->send_time_ms;
     }
 
-    if (!predicted_ready_) {
-      for (uint32_t i = 0; i < snap.count; ++i) {
-        if (snap.players[i].id != player_id_) continue;
+    for (uint32_t i = 0; i < snap.count; ++i) {
+      if (snap.players[i].id != player_id_) continue;
+      if (!predicted_ready_) {
         predicted_.addPlayer(player_id_, snap.players[i].x, snap.players[i].y);
         predicted_.setPlayerState(snap.players[i]);
         predicted_ready_ = true;
-        break;
+      } else if (prediction_enabled_) {
+        reconcile(snap.players[i], h.tick);
       }
+      break;
+    }
+  }
+
+  // Adopts the authoritative state, then replays every pending input
+  // stamped after h.tick and at or before the last tick an input was
+  // actually sent for (tick_ - 1: this call's own nominal ++tick_ has
+  // already run, but sendInput for that tick has not happened yet).
+  // A tick with no pending input skips applyInput -- World::step() then
+  // carries the velocity setPlayerState/the previous replay step just
+  // set, mirroring the server's own underrun-repeat semantics exactly.
+  void reconcile(const sim::PlayerState& authoritative, uint32_t snapshot_tick) noexcept {
+    predicted_.setPlayerState(authoritative);
+
+    const uint32_t last_sent = tick_ - 1;
+    if (snapshot_tick >= last_sent) return;
+    uint32_t from = snapshot_tick + 1;
+    // Bound the replay: a snapshot naming a tick far in the past must not
+    // make this call replay an unbounded number of steps from one packet.
+    if (last_sent - from + 1 > kPendingInputSlots) from = last_sent - kPendingInputSlots + 1;
+
+    for (uint32_t t = from; t <= last_sent; ++t) {
+      if (const PendingInput* p = pending_.find(t); p != nullptr) {
+        predicted_.applyInput(p->cmd);
+      }
+      predicted_.step();
     }
   }
 
