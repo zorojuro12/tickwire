@@ -442,6 +442,142 @@ not a surprise.
 
 ## P3 — Prediction, reconciliation, clock sync
 
+**Pivot — the server's apply-on-arrival input path had to become a
+tick-matched buffer, discovered before any prediction code was written.**
+P2's `Server::handleInput` applied a decoded `InputCommand` the moment it
+arrived, latching it as velocity that `World::step()` then integrated for
+however many ticks passed until the next packet — a count that depends on
+network jitter and that the client has no way to know in advance.
+Reconciliation's replay assumes the opposite: "N pending inputs = N
+simulated steps." Gabriel Gambetta's simpler model — the server processes
+inputs as they land and reports the last one processed, the client replays
+the rest — was considered and rejected for exactly this reason: it still
+lets the server integrate a latched input for a jitter-dependent tick count
+the client cannot reproduce, so reconciliation would fight prediction under
+precisely the 200 ms condition the demo exists to showcase. `InputBuffer`
+(Task 2) replaced it: one input consumed per player per tick, at the tick it
+was stamped for, with an underrun repeating the previously-latched velocity
+— the same behavior `World::step()` already had, now made deliberate rather
+than incidental.
+
+**Decision — clock sync is derived from `ack_tick − tick`, not an explicit
+RTT round trip.** This is why the wire format did not need to reopen: a
+`Snapshot`'s `tick` is already the reconciliation acknowledgment (the server
+consumes inputs strictly in tick order, so a snapshot at tick `S` has
+consumed every input stamped `≤ S`), and `ack_tick − tick` is the depth of
+the session's server-side input buffer — the whole feedback signal
+`client::ClockSync` needs, from two fields P1 reserved and P2 populated. No
+separate handshake or RTT sample was ever required for the *ongoing*
+correction loop. (The join handshake's own round trip *is* used, once, to
+seed the clock — see the finding below; that is a bootstrap concern, not the
+steady-state controller's signal.)
+
+**Decision — the client predicts the local player only.** Predicting a
+remote player would require predicting *its* inputs, which nothing can do;
+smoothing remote players between snapshots is entity interpolation, P4's
+scope. `Client`'s prediction world (`predicted_`) holds exactly one player.
+
+**Decision — fires resolve in a second pass, after every session's input for
+the tick has been applied.** Removes an ordering ambiguity P2 had
+implicitly: a single fused per-session pass (apply, then fire, then move to
+the next session) would make a hit depend on session iteration order.
+Tracing this precisely surfaced a correction to the plan itself: `World`'s
+position never changes until `World::step()`, which runs once at the end of
+`Server::tick()`, after *both* passes — so a shot always evaluates against
+positions from the start of the tick, regardless of any movement submitted
+for that same tick by the shooter or the target, in either a two-pass or a
+fused design. The two-pass split still matters (for future consumers that
+apply per-session, and simply for the ordering being explicit rather than
+incidental), but not for the reason first assumed.
+
+**Finding — `sim::World::latched_` is dead state.** Written by `addPlayer`
+and `applyInput`, never read anywhere — `World::step()` integrates
+`players_[i].vx/vy` directly. This is *why* `World::setPlayerState`
+(reconciliation's overwrite primitive, position and velocity only) is
+sufficient: there is no hidden latch also needing to be restored. Flagged as
+a `/refactor-clean` candidate; deliberately not removed in this phase, which
+is not the place to touch working code for tidiness alone.
+
+**Finding — `rttMs()` measures input-to-snapshot latency, not ping.** It
+includes however long the server's `InputBuffer` held the input before
+consuming it (up to `kTargetLeadTicks` worth) and the snapshot broadcast
+interval (`kSnapshotIntervalTicks`), so it reads roughly 50–100 ms above the
+wire round trip at 60 Hz. This is the number that matches what a player
+actually feels, which is why it's the one shown on the HUD — but it must
+never be labelled "ping" in the UI or the docs. See `docs/wire-format.md`'s
+`send_time_ms` entry for the full accounting.
+
+**Finding — a join-time clock seed needs the join handshake's own round
+trip, not just a fixed margin, to bootstrap under real latency.** The
+client's clock is seeded from a `JoinAccept`'s `h.tick` plus
+`kTargetLeadTicks`, but `h.tick` is the server's tick as of when it *sent*
+the accept — under real one-way latency, the server has already advanced
+further by the time the client processes it, and every subsequent input
+separately spends its own one-way trip reaching the server. A seed that only
+adds `kTargetLeadTicks` leaves every input arriving already behind the
+server's `InputBuffer` window — and since the ongoing correction loop only
+engages once at least one input is accepted (`ack_tick != 0`), a clock that
+starts this far behind has no way to recover on its own. Caught by Task 8's
+real-latency convergence test, not by any unit test — the join handshake
+inherently only exercises real latency when driven over an actual delayed
+transport, which no Task 1–7 checkpoint did. Fixed by seeding from the join
+handshake's own measured round-trip time (`Client::handleJoinAccept`), taken
+in full: half covers "catch up to where the server is now," half covers
+"survive this input's own future transit."
+
+**Finding — a fixed-size, single-signal clock controller can oscillate
+without damping, under real latency+jitter.** `ClockSync`'s original design
+(a raw ±1 nudge on every observed snapshot, whenever the reported lead
+missed `kTargetLeadTicks`) is a proportional controller closing a loop with
+substantial dead time: by the time a snapshot is seen, it already reflects
+the server's state from roughly one round trip ago, so several corrections
+can be sent — and each one's effect not yet visible — before the next
+observation arrives. Under 100 ms latency + 10 ms jitter, this produced a
+measurable, *growing* oscillation (debug tracing showed the raw observed
+lead swinging from roughly −43 to +42 across the run, the swing widening
+rather than settling) rather than convergence. This is a real,
+well-documented control-theory failure mode (a P-controller under dead time
+needs damping proportional to the delay), not a tuning slip. Fixed with two
+changes to the correction decision, both in `client::ClockSync`: an
+EMA-smoothed lead estimate (filtering single-sample jitter noise) and — the
+change that actually damped the oscillation — a cooldown limiting
+corrections to at most one per `kCorrectionCooldownObservations`, so each
+nudge has time to be reflected in a new observation before another is
+allowed to fire. The large-error snap path (`kSnapErrorTicks`) is
+deliberately exempt from the cooldown, so bootstrapping and recovery from a
+genuine large desync stay immediate.
+
+**Finding — `InputBuffer`'s original 16-slot (266 ms) acceptance window was
+too narrow for the phase's own 200 ms-RTT demo scenario to even bootstrap.**
+The join-seed fix above needs roughly 12 ticks of lead just to "catch up to
+now" before `kTargetLeadTicks` is even added — inside a 16-slot window, that
+leaves almost no headroom. A single overcorrection or jitter sample could
+push the client's stamped ticks past the window's *upper* bound (not just
+the lower one the window is usually reasoned about), and once that happens
+every subsequent input is rejected as arriving "too far in the future" —
+freezing `ack_tick` while the server's own tick keeps rising. `ClockSync`
+reads a frozen, falling-behind `ack_tick` as "too far behind" and pushes the
+clock *further* ahead in response: a runaway positive-feedback loop in the
+wrong direction (one debug trace showed the client's tick reaching 6753
+against a server tick of 801 before the fix). Widened `kInputBufferSlots` to
+64 (1.067 s) — comfortably larger than any lead the current join-seed
+formula or correction cooldown can produce.
+
+**Measured convergence, Task 8 Checkpoint 2 (100 ms one-way latency + 10 ms
+jitter each direction, 200 ms round trip, real `UdpTransport`, both server
+and client legs delayed):** comparing each client's on-screen position
+against the zero-latency ideal trajectory (both clients send identical
+input from the same spawn) — the comparison that matches the demo's actual
+claim, not a comparison against the server's own live, deliberately-lagging
+tick (see the self-review note on this in the plan; comparing against the
+server's live state would penalize prediction for doing its job). Predicting
+client: **0.000015 units** from ideal — effectively exact. Non-predicting
+client: **2.267 units** behind ideal (roughly 17 ticks' worth of movement at
+`kMoveSpeed`) — a clearly visible lag. Full numbers and the two-phase
+settle/move test design (decoupling "give the clock time to converge" from
+"don't run the mover into the arena's clamp") are in
+`tests/client/convergence_test.cpp`.
+
 ### Task 8 boundary — mandatory security review findings
 
 Threat model (same as P1/P2's): an unauthenticated attacker controls every byte
@@ -563,4 +699,4 @@ of the surrounding code.
 
 ---
 
-<!-- Next section: P3 decisions, pivots, and remaining findings (Task 10) -->
+<!-- Next section: ## P4 — Entity interpolation, snapshot delta -->

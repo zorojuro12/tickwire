@@ -30,6 +30,20 @@ changed or been discovered since.
 Every rule below was hit as a real failure during toolchain verification or
 plan execution, not assumed.
 
+- **The server consumes exactly one input per player per tick, at the tick it
+  was stamped for — never on arrival.** `Server::tick()`'s pass 1 pulls each
+  live session's input for the tick the call is about to simulate
+  (`server::InputBuffer::takeFor`). A tick with no matching input is an
+  *underrun*: it applies nothing, so `World::step()` integrates whatever
+  velocity is already latched — repeating the previous input, not stopping or
+  erroring. The client's reconciliation replay (`Client::reconcile`) must
+  mirror this exactly: on a tick it holds no pending input for, it skips
+  `applyInput` and calls only `World::step()`. Breaking this symmetry (e.g.
+  zeroing velocity on a client-side miss, or applying a stale input on a
+  server-side one) reintroduces the exact divergence P3 exists to close — see
+  `docs/project-history.md`'s P3 pivot entry for why apply-on-arrival was
+  replaced with this in the first place.
+
 ## Build and test
 
 - **Never invoke the host `g++`, `cmake`, or `ctest`.** The host has GCC 9.4

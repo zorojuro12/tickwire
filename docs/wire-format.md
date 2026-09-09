@@ -42,6 +42,11 @@ kProtocolVersion = 2
   — there is no cross-version compatibility. See
   `docs/project-history.md`'s P2 section for the alternatives considered and
   why they lost.
+- **P3 (2026-09-09): no layout change, `kProtocolVersion` stays 2.** Client
+  prediction, server reconciliation, and clock sync were built entirely on
+  the header fields P1 reserved and P2 populated (`tick`/`send_time_ms`/
+  `ack_tick`) — this is the record that the reservation worked as intended.
+  See `docs/project-history.md`'s P3 section.
 
 ## Packet header — 24 bytes
 
@@ -53,9 +58,9 @@ Every packet on the wire starts with this header.
 | 4 | 1 | `version` | must equal `kProtocolVersion` (2) |
 | 5 | 1 | `type` | `MsgType`; must be `1..kMaxMsgType` |
 | 6 | 2 | `payload_len` | bytes following the header; must equal the bytes actually present |
-| 8 | 4 | `tick` | sender's simulation tick — **populated at P2** on every outgoing packet |
-| 12 | 4 | `send_time_ms` | sender's monotonic ms — **populated at P2** on every outgoing packet; **reserved for P3** (RTT estimation is unimplemented — nothing reads it back yet) |
-| 16 | 4 | `ack_tick` | highest tick seen from the peer — **populated at P2**, but only by the server on `Snapshot` packets (per-recipient: each session's own highest acknowledged input tick); **reserved for P3** (drift correction doesn't consume it yet) |
+| 8 | 4 | `tick` | sender's simulation tick — **populated at P2** on every outgoing packet. On a `Snapshot`, this doubles as P3's reconciliation acknowledgment: the server consumes inputs strictly in tick order, so a snapshot at tick `S` has consumed every input stamped `≤ S`, and the client's reconciliation replay covers only the pending inputs stamped after it |
+| 12 | 4 | `send_time_ms` | sender's monotonic ms — **populated at P2** on every outgoing packet; **consumed at P3**: the client records it per pending input and, when a later snapshot's `ack_tick` names that input, computes `now_ms - send_time_ms` as an input-to-snapshot latency estimate. This is *not* a pure network round trip — it includes however long the server's `InputBuffer` held the input before consuming it, plus the snapshot broadcast interval — so it reads roughly 50-100 ms above the wire RTT at 60 Hz and must not be labelled "ping" |
+| 16 | 4 | `ack_tick` | highest tick seen from the peer — **populated at P2**, but only by the server on `Snapshot` packets (per-recipient: each session's own highest accepted input tick); **consumed at P3**: `ack_tick - tick` on a snapshot is the depth of that session's server-side input buffer, and is the *sole* feedback signal driving the client's clock-sync controller (`client::ClockSync`) — no separate RTT measurement is taken. `ack_tick == 0` means the session has had no input accepted yet; the controller ignores such a snapshot entirely rather than reading it as an enormous negative lead |
 | 20 | 2 | `seq` | reliable channel sequence — **populated at P2** on the join/leave channel only (`kJoinSeq = 1`, `kLeaveSeq = 2`); zero on `Input`/`Snapshot` |
 | 22 | 2 | `ack_seq` | reliable channel ack — **populated at P2**, echoed by the server on `JoinAccept`/`Leave` replies to the request's `seq`; zero elsewhere |
 
@@ -64,13 +69,14 @@ kJoinAccept = 4, kLeave = 5`. `kMaxMsgType = 5`. Values `6..255` are unused;
 P6's hit-feedback message can be added additively without touching the
 header or bumping the version again.
 
-**P2 populates every header field but doesn't yet consume most of them.**
-`tick`/`send_time_ms` are stamped on every outgoing packet and `ack_tick` on
-every `Snapshot`, but no code computes RTT from a `send_time_ms` round trip
-or corrects drift from `ack_tick` — that consumption logic is P3's job. The
-join/leave channel (`seq`/`ack_seq`) is the one field pair P2 both populates
-and fully consumes: it's what makes a retransmitted `JoinRequest` idempotent
-and lets the client tell a stale `JoinAccept` from a current one.
+**Every header field is now both populated and consumed.** P2 stamped every
+field but only fully consumed `seq`/`ack_seq` (the join/leave channel — what
+makes a retransmitted `JoinRequest` idempotent and lets the client tell a
+stale `JoinAccept` from a current one). P3 is the phase P1's reservation was
+made for: `tick`/`ack_tick` on a `Snapshot` drive reconciliation and clock
+sync (see the field notes above), and `send_time_ms` drives the input-to-
+snapshot latency estimate. No byte layout changed to make this happen —
+see "Version history" below.
 
 ## `InputCommand` payload — 25 bytes
 
