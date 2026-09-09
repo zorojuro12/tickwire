@@ -94,7 +94,17 @@ class Server {
 
     std::array<uint32_t, kMaxExpired> expired{};
     const size_t expired_count = sessions_.expire(world_.tick(), expired);
-    for (size_t i = 0; i < expired_count; ++i) world_.removePlayer(expired[i]);
+    for (size_t i = 0; i < expired_count; ++i) {
+      world_.removePlayer(expired[i]);
+      // Clear any future-ticked input this session already queued -- ids
+      // are reused (SessionTable::joinOrGet hands out the lowest free id),
+      // and InputBuffer::push accepts ticks up to kInputBufferSlots ahead
+      // of the server's own progress. Without this, a departed player's
+      // still-queued future input would execute under whichever new
+      // player inherits the same id, up to ~1s later -- found by the P3
+      // Task 8 security review.
+      inputs_[expired[i] - 1].reset();
+    }
   }
 
   size_t queuedPackets() const noexcept { return ring_.size(); }
@@ -153,6 +163,10 @@ class Server {
     }
     sessions_.remove(from);
     world_.removePlayer(id);
+    // See the identical note at the timeout-expiry call site: clears any
+    // future-ticked input this session already queued, so a reused id
+    // doesn't inherit and execute it under a new, unconsenting owner.
+    inputs_[id - 1].reset();
   }
 
   // Buffers `in` against the tick it is stamped for; does not apply it.

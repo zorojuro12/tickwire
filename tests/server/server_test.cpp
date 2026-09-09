@@ -596,6 +596,58 @@ void injectLeave(RecordingTransport& tp, const net::Endpoint& from) {
   tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
 }
 
+// InputBuffer accepts a tick up to kInputBufferSlots (64) ahead of the
+// server's own progress, and SessionTable::joinOrGet hands out the LOWEST
+// free id -- so a departing player's still-queued future input must not
+// survive to execute under whoever inherits their id next. Found by the
+// P3 Task 8 security review.
+TEST(ServerTest, DepartedPlayersQueuedFutureInputDoesNotSurviveIdReuse) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2060u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2061u};
+
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);  // world at tick 1
+  ASSERT_EQ(srv->playerFor(kEpA), 1u);
+
+  // A queues a real movement command for tick 20 -- well within the
+  // window, and not yet due -- then leaves immediately.
+  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false, 20);
+  srv->ingest();
+  srv->tick(16);  // world at tick 2; tick-20 input now queued, unconsumed
+
+  injectLeave(*tp, kEpA);
+  srv->ingest();
+  srv->tick(32);  // world at tick 3; A removed
+  ASSERT_EQ(srv->playerFor(kEpA), 0u);
+
+  // B joins and inherits id 1 -- the lowest free id, just vacated by A.
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(48);  // world at tick 4
+  ASSERT_EQ(srv->playerFor(kEpB), 1u);
+
+  // Advance to tick 20 with no input at all from B. If A's stale command
+  // survived, it fires here under B's identity.
+  for (uint32_t now_ms = 64; srv->worldTick() < 20; now_ms += 16) {
+    srv->tick(now_ms);
+  }
+  ASSERT_EQ(srv->worldTick(), 20u);
+
+  sim::WorldSnapshot snap{};
+  srv->world().writeSnapshot(snap);
+  const sim::PlayerState* b = nullptr;
+  for (uint32_t i = 0; i < snap.count; ++i) {
+    if (snap.players[i].id == 1) b = &snap.players[i];
+  }
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->vx, 0.0f);
+  EXPECT_EQ(b->x, -35.0f);  // spawnPosition(1); unmoved by A's stale input
+}
+
 TEST(ServerTest, LeaveRemovesThePlayerAndSendsNoReply) {
   auto tp = std::make_unique<RecordingTransport>();
   auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
