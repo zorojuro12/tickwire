@@ -371,16 +371,7 @@ TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   EXPECT_FALSE(c.sendInput(3016, 0.0f, 0.0f, 0.0f, 0.0f, false));
 }
 
-// Disabled by P3 Task 3: the server now consumes exactly one input per
-// player at the tick it was stamped for (see server::Server::tick()), but
-// Client<T> still stamps every input with its own free-running tick_
-// counter, which runs in exact lockstep with (never ahead of) the server's
-// world_.tick() in this loopback-driven test -- so every input this test
-// sends misses the InputBuffer's acceptance window by exactly one tick and
-// the player never moves. This is not a Task 3 defect: the client is
-// supposed to run its clock ahead of the server, which is P3 Task 5's job
-// (ClockSync). Restore this test once Task 5 lands.
-TEST(ClientTest, DISABLED_ClientAndServerConvergeInMemory) {
+TEST(ClientTest, ClientAndServerConvergeInMemory) {
   constexpr net::Endpoint kClientEp{0x7F000001u, 0x3010u};
   constexpr net::Endpoint kServerLoopEp{0x7F000001u, 0x3011u};
 
