@@ -8,6 +8,7 @@
 #include "net/framing.h"
 #include "net/protocol.h"
 #include "net/transport.h"
+#include "server/input_buffer.h"
 #include "server/packet_ring.h"
 #include "server/session.h"
 #include "sim/sim.h"
@@ -47,13 +48,46 @@ class Server {
     return accepted;
   }
 
-  // Drains the ring, steps the world, broadcasts on schedule.
+  // Drains the ring, consumes one input per live session at the tick this
+  // call is about to simulate, steps the world, broadcasts on schedule.
   void tick(uint32_t now_ms) noexcept {
     net::PacketSlot* slot;
     while ((slot = ring_.acquireRead()) != nullptr) {
       route(*slot, now_ms);
       ring_.commitRead();
     }
+
+    const uint32_t next = world_.tick() + 1;
+
+    // Pass 1: apply every live session's input for `next`, if it has one.
+    // A miss (underrun) applies nothing -- World::step() then integrates
+    // whatever velocity is already latched, which is the intended
+    // repeat-last-input behavior, not a bug to paper over.
+    std::array<sim::InputCommand, sim::kMaxPlayers> fire_candidates{};
+    size_t fire_count = 0;
+    for (size_t i = 0; i < sessions_.count(); ++i) {
+      const uint32_t id = sessions_.playerAt(i);
+      sim::InputCommand in{};
+      if (inputs_[id - 1].takeFor(next, in)) {
+        world_.applyInput(in);
+        if (in.fire) fire_candidates[fire_count++] = in;
+      } else {
+        ++input_underruns_;
+      }
+    }
+
+    // Pass 2: resolve every fire only after every session's input for this
+    // tick has been applied -- so a hit never depends on session iteration
+    // order (the shooter's fire resolving against the target's stale
+    // pre-input position).
+    for (size_t i = 0; i < fire_count; ++i) {
+      const sim::InputCommand& in = fire_candidates[i];
+      if (sessions_.tryFire(in.player_id, next) &&
+          world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y).has_value()) {
+        ++hits_[in.player_id - 1];
+      }
+    }
+
     world_.step();
 
     if (world_.tick() % kSnapshotIntervalTicks == 0) broadcastSnapshot(now_ms);
@@ -73,6 +107,8 @@ class Server {
   }
   uint64_t droppedPackets() const noexcept { return dropped_; }
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
+  uint64_t inputUnderruns() const noexcept { return input_underruns_; }
+  uint64_t lateInputs() const noexcept { return late_inputs_; }
 
  private:
   static void spawnPosition(uint32_t player_id, float& x, float& y) noexcept {
@@ -119,6 +155,10 @@ class Server {
     world_.removePlayer(id);
   }
 
+  // Buffers `in` against the tick it is stamped for; does not apply it.
+  // Application happens in tick()'s pass 1, at the tick the input names --
+  // never at arrival, which is what makes the client's replay reproduce the
+  // server's steps exactly.
   void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {
     sim::InputCommand in{};
     if (!net::decodeInput(r, in)) {
@@ -129,12 +169,14 @@ class Server {
       ++dropped_;
       return;
     }
-    sessions_.touch(from, world_.tick(), in.tick);
-    world_.applyInput(in);
-    if (in.fire && sessions_.tryFire(in.player_id, world_.tick())) {
-      if (world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y).has_value()) {
-        ++hits_[in.player_id - 1];
-      }
+    // Liveness updates unconditionally on a decoded, authorized input --
+    // independent of whether the InputBuffer's acceptance window then
+    // takes it.
+    sessions_.touch(from, world_.tick(), 0);
+    if (inputs_[in.player_id - 1].push(in)) {
+      sessions_.touch(from, world_.tick(), in.tick);
+    } else {
+      ++late_inputs_;
     }
   }
 
@@ -220,12 +262,15 @@ class Server {
   sim::World world_;
   SessionTable sessions_;
   PacketRing<net::PacketSlot, kIngestCapacity> ring_;
+  std::array<InputBuffer, sim::kMaxPlayers> inputs_{};
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};
   std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;
+  uint64_t input_underruns_ = 0;
+  uint64_t late_inputs_ = 0;
 };
 
 }  // namespace server

@@ -149,7 +149,7 @@ TEST(ServerTest, FullSessionTableRejectsWithLeave) {
 // Frames and injects one kInput packet from `from`, claiming `player_id`.
 void injectInput(RecordingTransport& tp, const net::Endpoint& from, uint32_t player_id,
                   float move_x, float move_y, float aim_x, float aim_y, bool fire,
-                  uint32_t tick = 0) {
+                  uint32_t tick) {
   const sim::InputCommand in{.player_id = player_id,
                               .tick = tick,
                               .move_x = move_x,
@@ -179,6 +179,51 @@ void injectJoin(RecordingTransport& tp, const net::Endpoint& from, uint16_t seq 
   tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
 }
 
+TEST(ServerTest, InputAppliesAtItsStampedTickNotOnArrival) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2050u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  ASSERT_EQ(srv->playerFor(kEpA), 1u);
+
+  sim::WorldSnapshot snap{};
+  const sim::PlayerState* findP1 = nullptr;
+
+  // Input stamped for tick 3 -- two ticks in the future.
+  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false, 3);
+  srv->ingest();
+
+  srv->tick(16);  // simulates tick 2 -- the stamped input is not due yet
+  snap = {};
+  srv->world().writeSnapshot(snap);
+  findP1 = nullptr;
+  for (uint32_t i = 0; i < snap.count; ++i) {
+    if (snap.players[i].id == 1) findP1 = &snap.players[i];
+  }
+  ASSERT_NE(findP1, nullptr);
+  EXPECT_EQ(findP1->x, -35.0f);
+  EXPECT_EQ(findP1->vx, 0.0f);
+  // 2, not 1: the join tick's own tick(0) call already counted one
+  // underrun for player 1 (it has no input the moment it joins), plus
+  // this tick(16) call's own underrun since the stamped input (tick 3)
+  // is not due yet.
+  EXPECT_EQ(srv->inputUnderruns(), 2u);
+
+  srv->tick(32);  // simulates tick 3 -- the stamped input applies now
+  snap = {};
+  srv->world().writeSnapshot(snap);
+  findP1 = nullptr;
+  for (uint32_t i = 0; i < snap.count; ++i) {
+    if (snap.players[i].id == 1) findP1 = &snap.players[i];
+  }
+  ASSERT_NE(findP1, nullptr);
+  EXPECT_EQ(findP1->vx, sim::kMoveSpeed);
+  EXPECT_EQ(findP1->x, -35.0f + sim::kMoveSpeed * sim::kTickDt);
+}
+
 TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
   auto tp = std::make_unique<RecordingTransport>();
   auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
@@ -195,7 +240,7 @@ TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
   ASSERT_EQ(srv->playerFor(kEpB), 2u);
 
   // A legitimate input from epA moves player 1 only.
-  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false);
+  injectInput(*tp, kEpA, 1, 1.0f, 0.0f, 0.0f, 0.0f, false, 2);
   srv->ingest();
   srv->tick(16);
   {
@@ -217,7 +262,7 @@ TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
 
   // Spoof: epA claims to be player 2.
   const uint64_t dropped_before_spoof = srv->droppedPackets();
-  injectInput(*tp, kEpA, 2, 1.0f, 0.0f, 0.0f, 0.0f, false);
+  injectInput(*tp, kEpA, 2, 1.0f, 0.0f, 0.0f, 0.0f, false, 3);
   srv->ingest();
   srv->tick(32);
   {
@@ -247,7 +292,7 @@ TEST(ServerTest, InputsMoveOnlyThePlayerTheSenderOwns) {
     }
     return 0.0f;
   }();
-  injectInput(*tp, kEpC, 1, -1.0f, 0.0f, 0.0f, 0.0f, false);
+  injectInput(*tp, kEpC, 1, -1.0f, 0.0f, 0.0f, 0.0f, false, 4);
   srv->ingest();
   srv->tick(48);
   {
@@ -342,20 +387,20 @@ TEST(ServerTest, FiringHitsTheNearestPlayerAlongTheAimAndIsRateLimited) {
   // along +x from player 1, per the 8x4 spawn grid.
   EXPECT_EQ(srv->hits(1), 0u);
 
-  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 10);
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 2);
   srv->ingest();
   srv->tick(16);
   EXPECT_EQ(srv->hits(1), 1u);
 
   // A second shot one tick later is still on cooldown.
-  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 11);
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 1.0f, 0.0f, true, 3);
   srv->ingest();
   srv->tick(32);
   EXPECT_EQ(srv->hits(1), 1u);
 
   // Clear the cooldown, then fire a miss (aiming away): hits stays unchanged.
   for (int i = 0; i < 15; ++i) srv->tick(48 + i * 16);
-  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, -1.0f, 0.0f, true, 30);
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, -1.0f, 0.0f, true, 19);
   srv->ingest();
   srv->tick(300);
   EXPECT_EQ(srv->hits(1), 1u);
@@ -373,14 +418,16 @@ TEST(ServerTest, SnapshotsGoOutAt20HzToEveryLiveSession) {
   srv->tick(0);
   tp->clearSent();
 
-  // An accepted input with tick=77 from epA; ack_tick reaches the next
-  // snapshot sent to epA.
-  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 77);
+  // An accepted input with tick=5 from epA -- ahead of the tick this
+  // tick(16) call actually simulates (2), so it is pushed but not yet
+  // consumed; ack_tick (the highest tick *accepted*, not consumed) reaches 5
+  // immediately.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 5);
   srv->ingest();
   srv->tick(16);
-  // Reordered: an accepted input with an older tick must not walk ack_tick
-  // backwards.
-  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 70);
+  // Reordered: an accepted input with an older tick (3 < 5, but still ahead
+  // of the buffer's consumption floor) must not walk ack_tick backwards.
+  injectInput(*tp, kEpA, 1, 0.0f, 0.0f, 0.0f, 0.0f, false, 3);
   srv->ingest();
 
   size_t snapshot_count = 0;
@@ -418,7 +465,7 @@ TEST(ServerTest, SnapshotsGoOutAt20HzToEveryLiveSession) {
     EXPECT_EQ(h.tick, snap.tick);
 
     if (s.to == kEpA) {
-      EXPECT_EQ(h.ack_tick, 77u);
+      EXPECT_EQ(h.ack_tick, 5u);
       found_a = true;
     } else if (s.to == kEpB) {
       EXPECT_EQ(h.ack_tick, 0u);
