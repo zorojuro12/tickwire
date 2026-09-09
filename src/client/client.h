@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "client/clock_sync.h"
+#include "client/prediction.h"
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
@@ -77,7 +78,14 @@ class Client {
     h.type = net::MsgType::kInput;
     h.tick = tick_;
     h.send_time_ms = now_ms;
-    return sendFramed(h, payload);
+    if (!sendFramed(h, payload)) return false;
+
+    pending_.record(in, now_ms);
+    if (predicted_ready_ && prediction_enabled_) {
+      predicted_.applyInput(in);
+      predicted_.step();
+    }
+    return true;
   }
 
   void leave(uint32_t now_ms) noexcept {
@@ -100,6 +108,39 @@ class Client {
   uint32_t clientTick() const noexcept { return tick_; }
   int32_t clockLead() const noexcept { return clock_.lead(); }
   uint32_t clockSnaps() const noexcept { return clock_.snaps(); }
+
+  void setPredictionEnabled(bool on) noexcept {
+    prediction_enabled_ = on;
+    // Re-seed from authority on the next snapshot rather than resuming a
+    // stale prediction world.
+    if (on) predicted_ready_ = false;
+  }
+  bool predictionEnabled() const noexcept { return prediction_enabled_; }
+
+  // The local player's position: predicted when prediction is on and the
+  // prediction world has been seeded, otherwise straight from the newest
+  // snapshot. False when no snapshot has yet carried this player.
+  bool localPosition(float& x, float& y) const noexcept {
+    if (prediction_enabled_ && predicted_ready_) {
+      predicted_.writeSnapshot(predicted_scratch_);
+      for (uint32_t i = 0; i < predicted_scratch_.count; ++i) {
+        if (predicted_scratch_.players[i].id == player_id_) {
+          x = predicted_scratch_.players[i].x;
+          y = predicted_scratch_.players[i].y;
+          return true;
+        }
+      }
+      return false;
+    }
+    for (uint32_t i = 0; i < snapshot_.count; ++i) {
+      if (snapshot_.players[i].id == player_id_) {
+        x = snapshot_.players[i].x;
+        y = snapshot_.players[i].y;
+        return true;
+      }
+    }
+    return false;
+  }
 
  private:
   void handlePacket(const net::PacketSlot& slot) noexcept {
@@ -149,6 +190,16 @@ class Client {
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;
     clock_.observe(h.tick, h.ack_tick);
+
+    if (!predicted_ready_) {
+      for (uint32_t i = 0; i < snap.count; ++i) {
+        if (snap.players[i].id != player_id_) continue;
+        predicted_.addPlayer(player_id_, snap.players[i].x, snap.players[i].y);
+        predicted_.setPlayerState(snap.players[i]);
+        predicted_ready_ = true;
+        break;
+      }
+    }
   }
 
   void sendJoinRequest(uint32_t now_ms) noexcept {
@@ -187,6 +238,11 @@ class Client {
   uint32_t server_time_ms_ = 0;
   sim::WorldSnapshot snapshot_{};
   ClockSync clock_;
+  sim::World predicted_;
+  PendingInputs pending_;
+  bool predicted_ready_ = false;
+  bool prediction_enabled_ = true;
+  mutable sim::WorldSnapshot predicted_scratch_{};
 };
 
 }  // namespace client

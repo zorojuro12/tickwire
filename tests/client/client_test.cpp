@@ -286,6 +286,38 @@ TEST(ClientTest, ClockCorrectionNeverUnderflows) {
   EXPECT_EQ(c.clientTick(), 0u);
 }
 
+sim::WorldSnapshot onePlayerSnapshot(uint32_t tick, float x, float y, float vx, float vy) {
+  sim::WorldSnapshot s{};
+  s.tick = tick;
+  s.count = 1;
+  s.players[0] = {.id = 1, .x = x, .y = y, .vx = vx, .vy = vy, .radius = 0.5f};
+  return s;
+}
+
+TEST(ClientTest, SendInputMovesTheLocalPlayerWithoutWaitingForASnapshot) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+  ASSERT_EQ(c.clientTick(), 503u);
+  ASSERT_TRUE(c.predictionEnabled());
+
+  injectSnapshot(*tp, 500, 5000, onePlayerSnapshot(500, 10.0f, 20.0f, 0.0f, 0.0f), 503);
+  c.tick(32);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 10.0f);
+  EXPECT_EQ(y, 20.0f);
+
+  EXPECT_TRUE(c.sendInput(48, 1.0f, 0.0f, 0.0f, 0.0f, false));
+
+  ASSERT_TRUE(c.localPosition(x, y));
+  EXPECT_EQ(x, 10.0f + sim::kMoveSpeed * sim::kTickDt);
+  EXPECT_EQ(y, 20.0f);
+}
+
 TEST(ClientTest, InputsGoOutAndSnapshotsLandNewestWins) {
   auto tp = std::make_unique<RecordingTransport>();
   Client<RecordingTransport> c(*tp, kServerEp);
