@@ -218,6 +218,58 @@ TEST(ClientTest, JunkPacketsAreIgnored) {
   EXPECT_EQ(c.snapshotsReceived(), 0u);
 }
 
+// A UDP socket is unconnected: tryReceive() hands back a datagram from any
+// source that reached this port, not just the joined server. Without a
+// source check, a single forged Leave from an unrelated address would
+// permanently block a still-joining client (no retry path out of
+// kRejected) -- no address spoofing required. Found by the P3 Task 8
+// security review.
+TEST(ClientTest, PacketsFromAnUnrelatedSourceAreIgnored) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+
+  constexpr net::Endpoint kAttacker{0x7F000001u, 0x9999u};
+
+  // A well-formed JoinAccept from the wrong source must not assign an id.
+  {
+    std::array<std::byte, net::kJoinAcceptBytes> payload{};
+    net::ByteWriter pw(payload);
+    ASSERT_TRUE(net::encodeJoinAccept(7, pw));
+    net::PacketHeader h;
+    h.type = net::MsgType::kJoinAccept;
+    h.ack_seq = kJoinSeq;
+    std::array<std::byte, net::kMaxPacket> buf{};
+    const size_t written = net::framePacket(h, payload, buf);
+    ASSERT_GT(written, 0u);
+    tp->inject(kAttacker, std::span<const std::byte>(buf).subspan(0, written));
+  }
+  c.tick(16);
+  EXPECT_EQ(c.state(), State::kJoining);
+  EXPECT_EQ(c.playerId(), 0u);
+
+  // A well-formed Leave (ack_seq == kJoinSeq) from the wrong source must
+  // not move the client to kRejected -- the permanent join-denial this
+  // check exists to close.
+  {
+    net::PacketHeader h;
+    h.type = net::MsgType::kLeave;
+    h.ack_seq = kJoinSeq;
+    std::array<std::byte, net::kMaxPacket> buf{};
+    const size_t written = net::framePacket(h, {}, buf);
+    ASSERT_GT(written, 0u);
+    tp->inject(kAttacker, std::span<const std::byte>(buf).subspan(0, written));
+  }
+  c.tick(32);
+  EXPECT_EQ(c.state(), State::kJoining);
+
+  // The real server's own accept still works afterward.
+  injectJoinAccept(*tp, 4, kJoinSeq);
+  c.tick(48);
+  EXPECT_EQ(c.state(), State::kJoined);
+  EXPECT_EQ(c.playerId(), 4u);
+}
+
 void injectSnapshot(RecordingTransport& tp, uint32_t tick, uint32_t send_time_ms,
                      const sim::WorldSnapshot& snap, uint32_t ack_tick = 0) {
   std::array<std::byte, net::kMaxPacket> payload{};

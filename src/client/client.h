@@ -136,11 +136,12 @@ class Client {
   // snapshot. False when no snapshot has yet carried this player.
   bool localPosition(float& x, float& y) const noexcept {
     if (prediction_enabled_ && predicted_ready_) {
-      predicted_.writeSnapshot(predicted_scratch_);
-      for (uint32_t i = 0; i < predicted_scratch_.count; ++i) {
-        if (predicted_scratch_.players[i].id == player_id_) {
-          x = predicted_scratch_.players[i].x;
-          y = predicted_scratch_.players[i].y;
+      sim::WorldSnapshot scratch{};
+      predicted_.writeSnapshot(scratch);
+      for (uint32_t i = 0; i < scratch.count; ++i) {
+        if (scratch.players[i].id == player_id_) {
+          x = scratch.players[i].x;
+          y = scratch.players[i].y;
           return true;
         }
       }
@@ -158,6 +159,19 @@ class Client {
 
  private:
   void handlePacket(const net::PacketSlot& slot, uint32_t now_ms) noexcept {
+    // A UDP socket is unconnected -- tryReceive() hands back a datagram
+    // from any source that reached this port, not just the joined server.
+    // Without this check, an attacker needs no source-address spoofing at
+    // all to inject a JoinAccept, Leave, or Snapshot: a single forged
+    // Leave with ack_seq == kJoinSeq permanently blocks a still-joining
+    // client (no retry path back out of kRejected), a forged JoinAccept
+    // races the real server for an attacker-chosen player id, and a
+    // stream of forged Snapshots can walk the client's clock via
+    // ClockSync's snap path (exempt from its cooldown) at an
+    // attacker-chosen rate rather than the server's 20 Hz -- found by the
+    // P3 Task 8 security review.
+    if (slot.peer != server_) return;
+
     net::ByteReader r(std::span<const std::byte>(slot.data).subspan(0, slot.len));
     net::PacketHeader h;
     if (!net::decodeHeader(r, h)) return;
@@ -251,14 +265,15 @@ class Client {
   // carries the velocity setPlayerState/the previous replay step just
   // set, mirroring the server's own underrun-repeat semantics exactly.
   void reconcile(const sim::PlayerState& authoritative, uint32_t snapshot_tick) noexcept {
-    predicted_.writeSnapshot(predicted_scratch_);
-    for (uint32_t i = 0; i < predicted_scratch_.count; ++i) {
-      if (predicted_scratch_.players[i].id != player_id_) continue;
+    sim::WorldSnapshot scratch{};
+    predicted_.writeSnapshot(scratch);
+    for (uint32_t i = 0; i < scratch.count; ++i) {
+      if (scratch.players[i].id != player_id_) continue;
       // std::hypot, not sqrt(dx*dx + dy*dy): avoids the intermediate
       // overflow squaring two large-but-finite floats can produce -- the
       // same hazard the P2 security review found in World::resolveHitscan.
-      const float dx = predicted_scratch_.players[i].x - authoritative.x;
-      const float dy = predicted_scratch_.players[i].y - authoritative.y;
+      const float dx = scratch.players[i].x - authoritative.x;
+      const float dy = scratch.players[i].y - authoritative.y;
       stats_.record(std::hypot(dx, dy));
       break;
     }
@@ -324,7 +339,6 @@ class Client {
   bool prediction_enabled_ = true;
   uint32_t rtt_ms_ = 0;
   PredictionStats stats_;
-  mutable sim::WorldSnapshot predicted_scratch_{};
 };
 
 }  // namespace client
