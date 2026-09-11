@@ -713,4 +713,94 @@ closes the last item P2 and P3 both deferred to a human.
 
 ---
 
-<!-- Next section: ## P4 — Entity interpolation, snapshot delta -->
+## P4 — Entity interpolation, snapshot delta
+
+### Task 10 boundary — mandatory security review findings
+
+Threat model (unchanged from P1/P2/P3): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/net/snapshot_delta.{h,cpp}`,
+`src/net/snapshot_ring.{h,cpp}`, `src/client/interpolation.{h,cpp}`, and the
+P4 diffs to `src/server/server.h`, `src/server/session.{h,cpp}` and
+`src/client/client.h`. No CRITICAL or HIGH findings; every MEDIUM and the
+cheap LOW findings were fixed, all without touching the wire format.
+
+**Fixed (MEDIUM, found independently by both agents) — a latent
+out-of-bounds read in `decodeSnapshotDelta`, dormant only because
+`sim::kMaxPlayers` happens to equal 32.** `record_count` is a `popcount` over
+the *full* 32-bit `changed_mask` read off the wire, but the fill loop that
+actually populates `SnapshotDelta::records` (sized `sim::kMaxPlayers`) only
+walks `id = 1..kMaxPlayers`. The two bounds agree today purely because a
+`uint32_t` mask and `kMaxPlayers == 32` happen to have the same width — if
+`kMaxPlayers` is ever changed, the finiteness-validation loop
+(`for (i = 0; i < record_count; ++i) records[i]`) would read past the end of
+the array for any attacker-set high mask bit, with nothing rejecting it.
+Not reachable today (there is no 33rd bit in a `uint32_t` to trigger it, so
+no RED/GREEN runtime test was possible). Fixed with a `static_assert` in
+`src/net/snapshot_delta.h` pinning `kMaxPlayers == 32` at the exact spot the
+masks are defined, converting a future silent landmine into a compile
+error — the same treatment `docs/wire-format.md`'s and `protocol.h`'s own
+wire-size invariants already get.
+
+**Fixed (MEDIUM) — an unbounded `ack_tick` could permanently pin a session to
+full keyframes.** `SessionTable::noteSnapshotAck` only ever moves
+`acked_snapshot_tick` forward, and `ack_tick` is raw, unvalidated data on
+every authorized `Input` packet. A single bogus large value (accidental —
+one dropped/reordered write on a buggy client — or deliberate) sticks
+permanently: every subsequent genuine, smaller `ack_tick` is then rejected as
+"older" by the same monotonicity the P4 plan itself added for a different
+reason (Task 4 Checkpoint 2). Blast radius is confined to the offending
+session's own bandwidth, not an amplification or DoS against the server or
+other sessions — this is a correctness/self-harm gap, not the kind of
+attacker-vs-victim finding P1/P2 recorded. Fixed in `Server::handleInput`
+(`src/server/server.h`): a legitimate client can only ack a tick the server
+already sent, which is always `<= world_.tick()`, so anything larger is
+rejected outright rather than recorded.
+
+**Fixed (MEDIUM) — a snapshot's payload-embedded tick was never checked
+against its header tick, and P4 is what first makes that field load-bearing.**
+`Client::acceptSnapshot`'s freshness gate checks `h.tick`, but stores and
+*keys* the `SnapshotRing` entry by the payload's own `snap.tick` — nothing
+validated the two agree. Pre-P4 the payload tick was a display value only;
+P4 turns it into a lookup key (`SnapshotRing::find`, a delta's
+`baseline_tick`), so a decoupled pair now corrupts that keying. Only
+reachable by forging the joined server's source address — the same
+precondition P3's review already accepted the client has no defense
+against — but the blast radius is new to this phase, and the fix is a
+one-line rejection (`snap.tick != h.tick`) regardless of precondition, so it
+was closed rather than waved at. This also subsumes a separately-flagged LOW
+finding (an unchecked `d.tick <= d.baseline_tick` on the wire): once
+`snap.tick` must equal the already-monotonic `h.tick`, a `d.tick` that
+doesn't advance sensibly can no longer pass the freshness gate at all.
+
+**Fixed (LOW, found independently by both agents) — `deltas_dropped_`
+undercounted.** Incremented only when the baseline lookup itself missed, not
+when a found baseline still made `applySnapshotDelta` fail (the
+"present-but-unchanged and absent from baseline" case). Not a safety issue —
+the world was already correctly left untouched either way — but the counter
+under-reported actual drops. Fixed by incrementing it on both early-return
+paths in `Client::handleSnapshotDelta`.
+
+**Fixed (LOW, style) — `__builtin_popcount` replaced with `std::popcount`**
+(`<bit>`, C++20, available on GCC 10 unlike `std::bit_cast`) in both
+`snapshot_delta.cpp` and its robustness-sweep test, per the cpp-reviewer's
+idiom note — a GCC/Clang extension where a standard equivalent exists and
+the toolchain supports it.
+
+**Verified, no fix needed — every other question the plan posed.** A crafted
+mask cannot escape `present_mask` (`decodeSnapshotDelta` already rejects
+`changed_mask & ~present_mask`, from Task 3); a forged `ack_tick` cannot move
+*another* session's baseline (`noteSnapshotAck` is keyed by the sender's own
+endpoint, reached only after `authorize()`); `applySnapshotDelta` and
+`decodeSnapshotDelta` both build into a fully local value and assign to the
+caller's output only on the single success path, never partially populating
+it on any rejection; non-finite floats are rejected in delta records the same
+way `decodeSnapshot` already rejects them in full records; the P3-established
+`slot.peer != server_` guard in `Client::handlePacket` covers the new
+`kSnapshotDelta` case with no exception; neither `SnapshotRing` has an
+unbounded-growth path (both are fixed `std::array`s with round-robin
+overwrite); and the three P1/P2 CRITICAL findings (spoofable session
+authorization, join/snapshot amplification, session-table exhaustion) are
+unaffected by this phase's changes — re-checked against the actual diff, not
+assumed, per the standard P3's review established.
