@@ -833,5 +833,39 @@ TEST(ClientTest, DropsADeltaAgainstAnUnheldBaseline) {
   EXPECT_EQ(c.latestSnapshot().players[0].y, 20.0f);
 }
 
+TEST(ClientTest, RemotePlayerIsInterpolatedBetweenSnapshots) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  sim::WorldSnapshot snap1{};
+  snap1.tick = 100;
+  snap1.count = 2;
+  snap1.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  snap1.players[1] = {.id = 2, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 100, 5000, snap1, 0);
+  c.tick(32);
+
+  sim::WorldSnapshot snap2 = snap1;
+  snap2.tick = 104;
+  snap2.players[1] = {.id = 2, .x = 10.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 104, 5064, snap2, 100);
+
+  uint32_t now_ms = 48;
+  for (int i = 0; i < 64 && c.renderTick() != 102; ++i) {
+    c.tick(now_ms);
+    now_ms += 16;
+  }
+  ASSERT_EQ(c.renderTick(), 102u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.remotePosition(2, x, y));
+  EXPECT_EQ(x, 5.0f);
+
+  EXPECT_FALSE(c.remotePosition(c.playerId(), x, y));
+}
+
 }  // namespace
 }  // namespace client

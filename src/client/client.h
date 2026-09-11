@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "client/clock_sync.h"
+#include "client/interpolation.h"
 #include "client/prediction.h"
 #include "net/bytes.h"
 #include "net/framing.h"
@@ -44,6 +45,7 @@ class Client {
 
   void tick(uint32_t now_ms) noexcept {
     ++tick_;
+    interp_.advance();
 
     net::PacketSlot slot;
     while (transport_.tryReceive(slot)) {
@@ -120,6 +122,7 @@ class Client {
   const net::SnapshotRing& snapshots() const noexcept { return snapshots_; }
   uint32_t deltasApplied() const noexcept { return deltas_applied_; }
   uint32_t deltasDropped() const noexcept { return deltas_dropped_; }
+  uint32_t renderTick() const noexcept { return interp_.renderTick(); }
 
   // A pure toggle: the prediction world is seeded once (on the first
   // snapshot that carries this player, in handleSnapshot below) and simply
@@ -160,6 +163,23 @@ class Client {
     }
     for (uint32_t i = 0; i < snapshot_.count; ++i) {
       if (snapshot_.players[i].id == player_id_) {
+        x = snapshot_.players[i].x;
+        y = snapshot_.players[i].y;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // The position to draw a REMOTE player at: interpolated when interpolation
+  // is on, the raw newest snapshot when it is off. False for the local
+  // player id (that one is predicted -- see localPosition) and for an
+  // unknown player.
+  bool remotePosition(uint32_t player_id, float& x, float& y) const noexcept {
+    if (player_id == player_id_ || player_id == sim::kInvalidPlayerId) return false;
+    if (interpolation_enabled_) return interp_.sample(snapshots_, player_id, x, y);
+    for (uint32_t i = 0; i < snapshot_.count; ++i) {
+      if (snapshot_.players[i].id == player_id) {
         x = snapshot_.players[i].x;
         y = snapshot_.players[i].y;
         return true;
@@ -270,6 +290,7 @@ class Client {
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;
     clock_.observe(h.tick, h.ack_tick);
+    interp_.observe(h.tick);
 
     // ack_tick names an input this client sent and (if still pending) still
     // holds the send time for -- RTT is a subtraction, no wire round trip
@@ -380,6 +401,8 @@ class Client {
   net::SnapshotRing snapshots_;
   uint32_t deltas_applied_ = 0;
   uint32_t deltas_dropped_ = 0;
+  Interpolator interp_;
+  bool interpolation_enabled_ = true;
 };
 
 }  // namespace client
