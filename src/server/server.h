@@ -110,6 +110,7 @@ class Server {
   size_t queuedPackets() const noexcept { return ring_.size(); }
   uint32_t worldTick() const noexcept { return world_.tick(); }
   const sim::World& world() const noexcept { return world_; }
+  const SessionTable& sessions() const noexcept { return sessions_; }
   uint32_t playerFor(const net::Endpoint& ep) const noexcept { return sessions_.playerFor(ep); }
   uint64_t hits(uint32_t player_id) const noexcept {
     if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
@@ -140,7 +141,7 @@ class Server {
         handleJoin(slot.peer, h, now_ms);
         break;
       case net::MsgType::kInput:
-        handleInput(slot.peer, r);
+        handleInput(slot.peer, h, r);
         break;
       case net::MsgType::kLeave:
         handleLeave(slot.peer, h);
@@ -173,7 +174,8 @@ class Server {
   // Application happens in tick()'s pass 1, at the tick the input names --
   // never at arrival, which is what makes the client's replay reproduce the
   // server's steps exactly.
-  void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {
+  void handleInput(const net::Endpoint& from, const net::PacketHeader& h,
+                    net::ByteReader& r) noexcept {
     sim::InputCommand in{};
     if (!net::decodeInput(r, in)) {
       ++dropped_;
@@ -185,8 +187,11 @@ class Server {
     }
     // Liveness updates unconditionally on a decoded, authorized input --
     // independent of whether the InputBuffer's acceptance window then
-    // takes it.
+    // takes it. The snapshot acknowledgment is likewise recorded only after
+    // authorize() succeeds -- an unauthorized sender must not be able to
+    // move another session's delta baseline.
     sessions_.touch(from, world_.tick(), 0);
+    sessions_.noteSnapshotAck(from, h.ack_tick);
     if (inputs_[in.player_id - 1].push(in)) {
       sessions_.touch(from, world_.tick(), in.tick);
     } else {

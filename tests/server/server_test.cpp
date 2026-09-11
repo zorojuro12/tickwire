@@ -740,5 +740,48 @@ TEST(ServerTest, SilentSessionsTimeOutAndTheFreedIdIsReusable) {
   EXPECT_EQ(srv->playerFor(kEpC), id_a);
 }
 
+// Frames and injects one kInput packet from `from`, claiming `player_id`,
+// with the header's ack_tick field set explicitly (injectInput always sends
+// a default header, ack_tick == 0).
+void injectInputWithAck(RecordingTransport& tp, const net::Endpoint& from, uint32_t player_id,
+                         uint32_t input_tick, uint32_t ack_tick) {
+  const sim::InputCommand in{.player_id = player_id,
+                              .tick = input_tick,
+                              .move_x = 0.0f,
+                              .move_y = 0.0f,
+                              .aim_x = 0.0f,
+                              .aim_y = 0.0f,
+                              .fire = false};
+  std::array<std::byte, net::kInputBytes> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeInput(in, pw));
+
+  net::PacketHeader h;
+  h.type = net::MsgType::kInput;
+  h.ack_tick = ack_tick;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ServerTest, InputAcknowledgmentUpdatesTheSessionsBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2060u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_id = srv->playerFor(kEpA);
+  ASSERT_NE(player_id, 0u);
+
+  injectInputWithAck(*tp, kEpA, player_id, /*input_tick=*/1, /*ack_tick=*/42);
+  srv->ingest();
+  srv->tick(16);
+
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_id), 42u);
+}
+
 }  // namespace
 }  // namespace server
