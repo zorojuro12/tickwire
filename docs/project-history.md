@@ -697,6 +697,20 @@ movement parameters, never from `predicted_`'s own state. This is the same
 distinction P2 recorded, now confirmed rather than waved at across a rewrite
 of the surrounding code.
 
+### Interactive feel — human-verified after phase completion
+
+The phase's own execution session could smoke-test the GUI (windows open,
+render, close without crashing) but explicitly could not judge whether
+prediction's effect *looked* convincing — the sessions have no tool to watch
+a WSLg-rendered window. Verified afterward by a human running the actual
+demo (`tw_server` + `tw_client --latency-ms 200` inside one container, so
+both share a network namespace over loopback): with `pred=on` (green)
+movement tracked input essentially instantly; toggling `pred=off` (yellow)
+mid-movement introduced an obvious, described-as-"low frame rate" lag
+matching the 200ms round trip; `[`/`]` visibly changed the HUD's `latency=`
+value at runtime. Confirms the design doc's headline prediction claim and
+closes the last item P2 and P3 both deferred to a human.
+
 ---
 
 <!-- Next section: ## P4 — Entity interpolation, snapshot delta -->
