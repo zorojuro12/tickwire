@@ -800,5 +800,38 @@ TEST(ClientTest, AppliesADeltaAgainstAHeldBaseline) {
   EXPECT_NE(c.snapshots().find(103), nullptr);
 }
 
+TEST(ClientTest, DropsADeltaAgainstAnUnheldBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  injectSnapshot(*tp, 100, 5000, onePlayerSnapshot(100, 10.0f, 20.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  dw.u32(103);  // tick
+  dw.u32(55);   // baseline_tick -- never received
+  dw.u32(0);    // present_mask
+  dw.u32(0);    // changed_mask
+  ASSERT_TRUE(dw.ok());
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.deltasDropped(), 1u);
+  EXPECT_EQ(c.deltasApplied(), 0u);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
+  ASSERT_EQ(c.latestSnapshot().count, 1u);
+  EXPECT_EQ(c.latestSnapshot().players[0].x, 10.0f);
+  EXPECT_EQ(c.latestSnapshot().players[0].y, 20.0f);
+}
+
 }  // namespace
 }  // namespace client
