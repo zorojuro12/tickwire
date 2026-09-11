@@ -221,5 +221,16 @@ TEST(SessionTableTest, IgnoresAnAcknowledgmentOlderThanTheStoredOne) {
   EXPECT_EQ(table.ackedSnapshotTick(pid), 121u);
 }
 
+TEST(SessionTableTest, ClearsTheAcknowledgedTickWhenASessionIsRemoved) {
+  SessionTable table;
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+  table.noteSnapshotAck(ep(0), 120);
+  ASSERT_TRUE(table.remove(ep(0)));
+
+  const uint32_t b = table.joinOrGet(ep(1), 0);
+  ASSERT_EQ(b, a);
+  EXPECT_EQ(table.ackedSnapshotTick(b), 0u);
+}
+
 }  // namespace
 }  // namespace server
