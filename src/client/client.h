@@ -292,6 +292,14 @@ class Client {
     // Newest wins: adopt only when strictly newer than what is already
     // stored.
     if (h.tick <= latest_snapshot_tick_) return;
+    // A legitimate server always encodes the payload's own tick from the
+    // same world_.tick() value as the header's tick field. snap.tick is
+    // what SnapshotRing::store keys this entry by, and what a later
+    // delta's baseline_tick is looked up against -- a decoupled pair
+    // would let a forged packet corrupt that keying (only reachable by
+    // forging the joined server's source address, an already-accepted
+    // precondition, but cheap to close regardless).
+    if (snap.tick != h.tick) return;
     snapshot_ = snap;
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;

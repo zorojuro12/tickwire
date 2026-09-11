@@ -909,5 +909,33 @@ TEST(ClientTest, InterpolationToggleFallsBackToTheNewestSnapshot) {
   EXPECT_EQ(x, 5.0f);
 }
 
+TEST(ClientTest, RejectsASnapshotWhosePayloadTickDisagreesWithItsHeader) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  // A joined server always sets the header tick and the encoded payload's
+  // tick from the same world_.tick() value; only a source willing to forge
+  // the joined server's address (the same precondition the P3 review
+  // already accepted the client has no defense against) could produce a
+  // mismatch. Closing it is still cheap: it's what SnapshotRing keys its
+  // entries by, and net::SnapshotDelta::baseline_tick lookups by, so a
+  // decoupled pair would let a forged packet corrupt that keying.
+  sim::WorldSnapshot mismatched = onePlayerSnapshot(100, 5.0f, 5.0f, 0.0f, 0.0f);
+  injectSnapshot(*tp, /*header tick=*/105, 5000, mismatched, 0);
+  c.tick(32);
+
+  EXPECT_EQ(c.latestSnapshotTick(), 0u);
+  EXPECT_EQ(c.snapshots().find(100), nullptr);
+  EXPECT_EQ(c.snapshots().find(105), nullptr);
+
+  // A matched pair is still accepted normally.
+  injectSnapshot(*tp, 100, 5016, onePlayerSnapshot(100, 5.0f, 5.0f, 0.0f, 0.0f), 0);
+  c.tick(48);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
+}
+
 }  // namespace
 }  // namespace client
