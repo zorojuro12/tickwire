@@ -715,6 +715,137 @@ closes the last item P2 and P3 both deferred to a human.
 
 ## P4 — Entity interpolation, snapshot delta
 
+**Decision 1 — a new message type, not a format version bump.**
+`kSnapshotDelta = 6`, `kMaxMsgType` 5 → 6. `docs/wire-format.md` already
+designated `6..255` as the additive-extension path, so `kProtocolVersion`
+stays **2**. Full `kSnapshot` packets remain the keyframe every session
+starts on and the fallback whenever a delta can't be cut — delta is an
+optimization layered over the existing message, never a replacement for it.
+
+**Decision 2 — the delta baseline is acknowledged through `ack_tick`, which
+costs zero new bytes.** `PacketHeader::ack_tick` had been populated only by
+the server, on `Snapshot` packets, since P2; on client→server `Input` packets
+it had always been the reserved-but-unused default `0` since P1. The client
+now sets `ack_tick = latest_snapshot_tick_` on every input, and the server
+records it per session. The same story P1's reservation told at P3 repeats
+here: a field that was already there turns out to be exactly the channel a
+later phase needed, with no wire-format reopening required.
+
+**Decision 3 — a deliberate deviation from the architecture-resolution doc:
+unchanged players cost zero bytes, but `radius` stays in the records that are
+sent.** The resolution doc names `radius` as *"the first field to drop from a
+delta"* (it is `sim::kPlayerRadius` for every player, always, so it never
+carries information). This plan does something strictly better instead:
+drops the **entire 24-byte record** for every *unchanged* player, while
+keeping `radius` inside the 20-byte records that *are* sent. Dropping
+`radius` from a sent record would save 4 bytes but forces a baseline lookup
+(or a hardcoded `sim::kPlayerRadius` in the wire decoder) for a player who
+has no baseline entry — i.e. one who joined since the baseline — turning that
+case into a variable-size record or a decoder special case, for 4 bytes.
+Keeping it buys the property Task 2 Checkpoint 5 exists to prove: **a delta
+applied to its baseline reconstructs a `WorldSnapshot` field-for-field
+identical to the full snapshot of the same tick.** Worth far more than the
+bytes, and it's what let `applySnapshotDelta`'s reconstruction loop stay a
+single, uniform walk over `present_mask` with no per-field special case.
+
+**Decision 4 — the interpolation timeline is its own controller
+(`client::Interpolator`), not `clockLead()`.** The obvious shortcut —
+render at `tick_ - clockLead() - delay` — was rejected: `clockLead()` is
+documented as a stale, round-trip-old value, and P3's own convergence work
+found it reports a materially different number from the true gap. Feeding a
+noisy estimate into the render path would reintroduce the jitter this phase
+exists to remove. `Interpolator` instead holds a `render_tick_` advanced one
+tick per client tick and corrected toward
+`newest_snapshot_tick - kInterpDelayTicks` on each snapshot — and,
+unlike `ClockSync`, needs **no EMA and no cooldown**: `ClockSync` closes a
+loop over substantial dead time (it observes the delayed effect of its own
+past corrections, which is what produced the *growing* oscillation P3's
+history records), whereas `Interpolator` observes the snapshot tick directly
+and its own correction has no influence on that signal at all. A plain
+snap-or-nudge is both sufficient and correct here — confirmed, not just
+theorized: `interpolation_test.cpp`'s five checkpoints never needed either
+mechanism to pass.
+
+**Decision 5 — no extrapolation on starvation; remote players freeze at the
+newest known position instead.** Extrapolation guesses a velocity-projected
+position that must later be visibly retracted — the classic way a 50 ms gap
+becomes a 200 ms rubber-band. `kInterpDelayTicks = 6` (two full snapshot
+intervals, 100 ms) exists specifically to make the starvation path rare;
+freezing for the ~50 ms until the next snapshot is the better artifact on the
+occasions it isn't.
+
+**Decision 6 — `kMaxPlayers` stays at 32 this phase.** Delta's justification
+is headroom, and this phase *measures* the headroom rather than spending it.
+The worst-case player-ceiling arithmetic (`docs/wire-format.md`'s "Maximum
+packet size" section has the full derivation):
+
+| Encoding | On the wire (+24 B header) | Max players under 1200 B |
+|---|---|---:|
+| Full snapshot | `32 + 24N` | **48** |
+| Delta, worst case (every player changed) | `40 + 20N` | **58** |
+
+**Measured byte savings, from a real `tw_server` run** (8 players, all
+continuously moving via `tw_loadclient`'s default alternating-direction
+pattern — every player changes on nearly every broadcast, so this is close
+to delta's *worst realistic case*, not the favorable few-movers one):
+`snapshot_bytes=140992 full_equiv_bytes=160000 deltas=792 keyframes=8` over a
+300-tick run. That's an **11.9% reduction even when every player is moving
+every tick** (792 delta packets averaging 176 B against a full snapshot's
+200 B for 8 players — exactly `16 + 8×20` vs `8 + 8×24`, matching the wire
+format's byte accounting exactly). The 8 keyframes are the one-per-player
+initial join cost; every broadcast after that was a delta. The
+favorable-case number the design doc's headline claims (a two-mover delta
+against a 32-player full snapshot, ~90% smaller) is the wire-format doc's
+own worked example, not separately re-measured here — this run's point is
+that the *worst* realistic case still saves meaningfully, which the
+favorable case was never in question for.
+
+### What execution discovered that the plan didn't anticipate
+
+**A cross-checkpoint coupling the plan's own checkpoint-scoped verification
+didn't catch until it ran.** Task 5 (server broadcasts deltas) already made
+the server delta-capable; Task 6 Checkpoint 1 (client sends a real `ack_tick`)
+is what first gives the server a session willing to receive one. The moment
+that checkpoint's client-side change landed, the server started actually
+sending `kSnapshotDelta` packets to it — but the client couldn't decode that
+message type until Checkpoint 2, landing next. Checkpoint 1's own prescribed
+verification command (`ctest -R client_test`, the whole file) transiently
+failed on the pre-existing `ClientAndServerConvergeInMemory` integration
+test as a result — a real, if temporary, regression the plan's per-checkpoint
+structure didn't flag as a risk. Resolved by verifying Checkpoint 1's own new
+test in isolation (documented in that commit), then closing the gap
+immediately with Checkpoint 2 (the very next commit), after which the full
+target was green again. `ClientAndServerConvergeInMemory` also needed its own
+assertion fixed afterward: `snapshotsReceived()` alone (full snapshots only)
+undercounts once most broadcasts become deltas, so it now asserts
+`snapshotsReceived() + deltasApplied()`.
+
+**The `robustness_test.cpp` fixed-seed fuzz sweep broke again, same class of
+finding as P1 and P2.** Widening `kMaxMsgType` from 5 to 6 (Task 2 Checkpoint
+1) shifted the RNG draw sequence in `RandomByteBuffersNeverCrashADecoder`
+(`1 + rng() % kMaxMsgType` draws a different value and shifts every later
+draw), so the seed already in place — itself a prior substitution, recorded
+in this same doc's P1 section — stopped producing any payload-shaped hit in
+20,000 trials. Re-searched against the real decoders; seed `2` (recorded in
+the test's own comment, now naming all three seeds this sweep has needed and
+why each stopped working) reliably hits again. Same escape hatch the plan
+already authorizes elsewhere in this task: a fixed seed is for
+reproducibility, not sacred.
+
+**A stuck WSLg-forwarded GUI process survives closing the terminal that
+launched it, and neither Ctrl+C nor Windows Task Manager can reach it.**
+Discovered live during the human verification below: resizing a `tw_client`
+window mid-run froze it, and the user's terminal, Ctrl+C, and Task Manager
+were all unable to stop it. The process is running inside the
+`tickwire-dev` container's own PID namespace under WSL2, not as a native
+Windows process — invisible to Task Manager and unreachable by a signal sent
+to the (now-closed) terminal that launched `scripts/tw`. `docker ps -a`
+from any WSL shell found it immediately (still `Up`, an orphaned
+`scripts/tw` invocation), and `docker stop <name>` reached it directly and
+succeeded (the container was run with `--rm`, so it also self-removed).
+Recorded here since P2 and P3's GUI verification sessions never hit this —
+P2/P3's smoke runs didn't resize the window mid-session.
+
 ### Task 10 boundary — mandatory security review findings
 
 Threat model (unchanged from P1/P2/P3): an unauthenticated attacker controls
@@ -804,3 +935,19 @@ overwrite); and the three P1/P2 CRITICAL findings (spoofable session
 authorization, join/snapshot amplification, session-table exhaustion) are
 unaffected by this phase's changes — re-checked against the actual diff, not
 assumed, per the standard P3's review established.
+
+### Interactive feel — human-verified after phase completion
+
+Same limitation P2 and P3 both recorded: the phase's own execution session
+could smoke-test the GUI build and a headless server+client run, but could
+not judge whether interpolation *looked* smooth — no session tool can watch
+a WSLg-rendered window. Verified afterward by a human running two `tw_client`
+instances against one `tw_server` at 150 ms simulated latency, one player
+moving and watched from the other window: with interpolation on, the remote
+player's movement appeared as a smooth glide (red circle); pressing `I` to
+disable it switched the same remote player to visibly stepping at the 20 Hz
+snapshot rate (orange circle) instead. Matches the design's claim exactly —
+confirmed by direct comparison of the same player under both states, not
+just "it looked fine." Closes Task 9 Checkpoint 3's outstanding item.
+
+<!-- Next section: ## P5 — Threading, queue benchmark -->
