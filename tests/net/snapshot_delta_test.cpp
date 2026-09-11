@@ -129,5 +129,54 @@ TEST(SnapshotDeltaTest, PlayerAbsentFromBaselineIsSentInFull) {
   EXPECT_TRUE(found5);
 }
 
+TEST(SnapshotDeltaTest, DeltaThenApplyEqualsTheFullSnapshot) {
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 100;
+  baseline.count = sim::kMaxPlayers;
+  for (uint32_t i = 0; i < sim::kMaxPlayers; ++i) {
+    baseline.players[i] = sim::PlayerState{
+        i + 1, static_cast<float>(i) * 1.5f, -static_cast<float>(i) * 0.25f, 0.0f, 0.0f,
+        sim::kPlayerRadius};
+  }
+
+  sim::WorldSnapshot current = baseline;
+  current.tick = 103;
+  for (uint32_t id : {1u, 7u, 8u, 31u, 32u}) {
+    sim::PlayerState& p = current.players[id - 1];
+    p.x += 0.125f;
+    p.vx = sim::kMoveSpeed;
+  }
+
+  std::array<std::byte, kMaxPacket> delta_buf{};
+  ByteWriter dw(delta_buf);
+  ASSERT_TRUE(encodeSnapshotDelta(baseline, current, dw));
+
+  ByteReader dr(std::span<const std::byte>(delta_buf).subspan(0, dw.size()));
+  SnapshotDelta d{};
+  ASSERT_TRUE(decodeSnapshotDelta(dr, d));
+
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(applySnapshotDelta(baseline, d, out));
+  EXPECT_EQ(out.tick, current.tick);
+  EXPECT_EQ(out.count, current.count);
+  for (uint32_t i = 0; i < out.count; ++i) {
+    const sim::PlayerState& expected = current.players[i];
+    const sim::PlayerState& got = out.players[i];
+    EXPECT_EQ(got.id, expected.id);
+    EXPECT_EQ(got.x, expected.x);
+    EXPECT_EQ(got.y, expected.y);
+    EXPECT_EQ(got.vx, expected.vx);
+    EXPECT_EQ(got.vy, expected.vy);
+    EXPECT_EQ(got.radius, expected.radius);
+  }
+
+  std::array<std::byte, kMaxPacket> full_buf{};
+  ByteWriter fw(full_buf);
+  ASSERT_TRUE(encodeSnapshot(current, fw));
+  EXPECT_LT(dw.size(), fw.size());
+  EXPECT_EQ(dw.size(), kSnapshotDeltaFixedBytes + 5 * kDeltaRecordBytes);
+  EXPECT_EQ(fw.size(), kSnapshotFixedBytes + sim::kMaxPlayers * kPlayerStateBytes);
+}
+
 }  // namespace
 }  // namespace net
