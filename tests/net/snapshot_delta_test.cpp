@@ -90,5 +90,44 @@ TEST(SnapshotDeltaTest, DepartedPlayerIsDroppedFromPresentMask) {
   }
 }
 
+TEST(SnapshotDeltaTest, PlayerAbsentFromBaselineIsSentInFull) {
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 100;
+  baseline.count = 1;
+  baseline.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+
+  sim::WorldSnapshot current{};
+  current.tick = 103;
+  current.count = 2;
+  current.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+  current.players[1] = sim::PlayerState{5, -35.0f, 25.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+
+  std::array<std::byte, kMaxPacket> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshotDelta(baseline, current, w));
+  EXPECT_EQ(w.size(), kSnapshotDeltaFixedBytes + kDeltaRecordBytes);
+
+  ByteReader r(std::span<const std::byte>(buf).subspan(0, w.size()));
+  SnapshotDelta d{};
+  ASSERT_TRUE(decodeSnapshotDelta(r, d));
+  EXPECT_EQ(d.present_mask, 0b10001u);
+  EXPECT_EQ(d.changed_mask, 0b10000u);
+  EXPECT_EQ(d.record_count, 1u);
+  EXPECT_EQ(d.records[0].id, 5u);
+
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(applySnapshotDelta(baseline, d, out));
+  EXPECT_EQ(out.count, 2u);
+  bool found5 = false;
+  for (uint32_t i = 0; i < out.count; ++i) {
+    if (out.players[i].id == 5u) {
+      found5 = true;
+      EXPECT_FLOAT_EQ(out.players[i].x, -35.0f);
+      EXPECT_FLOAT_EQ(out.players[i].y, 25.0f);
+    }
+  }
+  EXPECT_TRUE(found5);
+}
+
 }  // namespace
 }  // namespace net
