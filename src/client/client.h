@@ -9,6 +9,8 @@
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "net/transport.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -115,6 +117,9 @@ class Client {
   uint32_t clientTick() const noexcept { return tick_; }
   int32_t clockLead() const noexcept { return clock_.lead(); }
   uint32_t clockSnaps() const noexcept { return clock_.snaps(); }
+  const net::SnapshotRing& snapshots() const noexcept { return snapshots_; }
+  uint32_t deltasApplied() const noexcept { return deltas_applied_; }
+  uint32_t deltasDropped() const noexcept { return deltas_dropped_; }
 
   // A pure toggle: the prediction world is seeded once (on the first
   // snapshot that carries this player, in handleSnapshot below) and simply
@@ -194,6 +199,9 @@ class Client {
       case net::MsgType::kSnapshot:
         handleSnapshot(r, h, now_ms);
         break;
+      case net::MsgType::kSnapshotDelta:
+        handleSnapshotDelta(r, h, now_ms);
+        break;
       default:
         break;
     }
@@ -232,9 +240,31 @@ class Client {
     sim::WorldSnapshot snap{};
     if (!net::decodeSnapshot(r, snap)) return;
     ++snapshots_received_;
+    acceptSnapshot(snap, h, now_ms);
+  }
+
+  void handleSnapshotDelta(net::ByteReader& r, const net::PacketHeader& h,
+                            uint32_t now_ms) noexcept {
+    net::SnapshotDelta d{};
+    if (!net::decodeSnapshotDelta(r, d)) return;
+    const sim::WorldSnapshot* baseline = snapshots_.find(d.baseline_tick);
+    if (baseline == nullptr) {
+      ++deltas_dropped_;
+      return;
+    }
+    sim::WorldSnapshot reconstructed{};
+    if (!net::applySnapshotDelta(*baseline, d, reconstructed)) return;
+    ++deltas_applied_;
+    acceptSnapshot(reconstructed, h, now_ms);
+  }
+
+  // Shared acceptance tail for both a full snapshot and a reconstructed
+  // delta, so the two paths cannot silently drift -- duplicating this is
+  // how a delta-fed client would stop reconciling.
+  void acceptSnapshot(const sim::WorldSnapshot& snap, const net::PacketHeader& h,
+                       uint32_t now_ms) noexcept {
     // Newest wins: adopt only when strictly newer than what is already
-    // stored. A decode failure adopts nothing (handled by the early return
-    // above, before snapshots_received_ is incremented).
+    // stored.
     if (h.tick <= latest_snapshot_tick_) return;
     snapshot_ = snap;
     latest_snapshot_tick_ = h.tick;
@@ -261,6 +291,8 @@ class Client {
       }
       break;
     }
+
+    snapshots_.store(snapshot_);
   }
 
   // Adopts the authoritative state, then replays every pending input
@@ -345,6 +377,9 @@ class Client {
   bool prediction_enabled_ = true;
   uint32_t rtt_ms_ = 0;
   PredictionStats stats_;
+  net::SnapshotRing snapshots_;
+  uint32_t deltas_applied_ = 0;
+  uint32_t deltas_dropped_ = 0;
 };
 
 }  // namespace client

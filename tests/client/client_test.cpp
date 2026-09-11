@@ -11,6 +11,8 @@
 #include "net/loopback.h"
 #include "net/protocol.h"
 #include "net/simulated.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "server/server.h"
 #include "sim/sim.h"
 #include "support/recording_transport.h"
@@ -637,7 +639,10 @@ TEST(ClientTest, ClientAndServerConvergeInMemory) {
     pump();
   }
 
-  EXPECT_GE(c->snapshotsReceived(), 15u);
+  // Total updates received, not just full snapshots: once this client's
+  // inputs start acknowledging a held baseline, the server switches most
+  // broadcasts to kSnapshotDelta, so snapshotsReceived() alone undercounts.
+  EXPECT_GE(c->snapshotsReceived() + c->deltasApplied(), 15u);
   ASSERT_GT(c->latestSnapshot().count, 0u);
   const sim::PlayerState* own = nullptr;
   for (uint32_t i = 0; i < c->latestSnapshot().count; ++i) {
@@ -740,6 +745,59 @@ TEST(ClientTest, InputAcknowledgesTheNewestSnapshotHeld) {
     ASSERT_TRUE(net::decodeHeader(r, h));
     EXPECT_EQ(h.ack_tick, 77u);
   }
+}
+
+void injectSnapshotDelta(RecordingTransport& tp, const net::PacketHeader& h,
+                          std::span<const std::byte> payload) {
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ClientTest, AppliesADeltaAgainstAHeldBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 100;
+  baseline.count = 2;
+  baseline.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  baseline.players[1] = {.id = 2, .x = 1.0f, .y = 1.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 100, 5000, baseline, 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  sim::WorldSnapshot current = baseline;
+  current.tick = 103;
+  current.players[1] = {
+      .id = 2, .x = 4.0f, .y = 1.0f, .vx = sim::kMoveSpeed, .vy = 0.0f, .radius = 0.5f};
+
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  ASSERT_TRUE(net::encodeSnapshotDelta(baseline, current, dw));
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.latestSnapshotTick(), 103u);
+  bool found = false;
+  for (uint32_t i = 0; i < c.latestSnapshot().count; ++i) {
+    if (c.latestSnapshot().players[i].id != 2) continue;
+    found = true;
+    EXPECT_FLOAT_EQ(c.latestSnapshot().players[i].x, 4.0f);
+    EXPECT_FLOAT_EQ(c.latestSnapshot().players[i].vx, sim::kMoveSpeed);
+  }
+  EXPECT_TRUE(found);
+  EXPECT_EQ(c.deltasApplied(), 1u);
+  EXPECT_EQ(c.deltasDropped(), 0u);
+  EXPECT_NE(c.snapshots().find(103), nullptr);
 }
 
 }  // namespace
