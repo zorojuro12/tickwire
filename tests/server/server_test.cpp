@@ -10,6 +10,7 @@
 #include "net/framing.h"
 #include "net/loopback.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
 #include "net/transport.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -863,6 +864,95 @@ TEST(ServerTest, SendsADeltaToASessionHoldingAKnownBaseline) {
     if (h.type == net::MsgType::kSnapshot) found_b_snapshot = true;
   }
   EXPECT_TRUE(found_b_snapshot);
+}
+
+TEST(ServerTest, ASentDeltaReconstructsTheAuthoritativeSnapshot) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2080u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2081u};
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  uint32_t input_tick = 1;
+  for (uint32_t i = 0; i < 2 * kSnapshotIntervalTicks; ++i) {
+    injectInput(*tp, kEpA, player_a, 1.0f, 0.0f, 0.0f, 0.0f, false, input_tick++);
+    srv->ingest();
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  sim::WorldSnapshot baseline{};
+  bool found_first_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) {
+      ASSERT_TRUE(net::decodeSnapshot(r, baseline));
+      t0 = h.tick;
+      found_first_snapshot = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_first_snapshot);
+
+  injectInputWithAck(*tp, kEpA, player_a, input_tick, t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    injectInput(*tp, kEpA, player_a, 1.0f, 0.0f, 0.0f, 0.0f, false, input_tick++);
+    srv->ingest();
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  net::PacketHeader delta_h;
+  net::SnapshotDelta d{};
+  bool found_delta = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshotDelta) {
+      ASSERT_TRUE(net::decodeSnapshotDelta(r, d));
+      delta_h = h;
+      found_delta = true;
+    }
+  }
+  ASSERT_TRUE(found_delta);
+
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(net::applySnapshotDelta(baseline, d, out));
+
+  sim::WorldSnapshot expected{};
+  srv->world().writeSnapshot(expected);
+  EXPECT_EQ(out.tick, delta_h.tick);
+  EXPECT_EQ(out.count, expected.count);
+  for (uint32_t i = 0; i < out.count; ++i) {
+    const sim::PlayerState* want = nullptr;
+    for (uint32_t j = 0; j < expected.count; ++j) {
+      if (expected.players[j].id == out.players[i].id) want = &expected.players[j];
+    }
+    ASSERT_NE(want, nullptr);
+    EXPECT_EQ(out.players[i].x, want->x);
+    EXPECT_EQ(out.players[i].y, want->y);
+    EXPECT_EQ(out.players[i].vx, want->vx);
+    EXPECT_EQ(out.players[i].vy, want->vy);
+    EXPECT_EQ(out.players[i].radius, want->radius);
+  }
 }
 
 }  // namespace
