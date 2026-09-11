@@ -264,5 +264,47 @@ TEST(SnapshotDeltaTest, RejectsNonFiniteRecordFields) {
   }
 }
 
+TEST(SnapshotDeltaTest, GoldenByteVector) {
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 0x64;
+  baseline.count = 2;
+  baseline.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+  baseline.players[1] = sim::PlayerState{2, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+
+  sim::WorldSnapshot current{};
+  current.tick = 0x67;
+  current.count = 2;
+  current.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+  current.players[1] = sim::PlayerState{2, 2.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+
+  std::array<std::byte, kMaxPacket> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshotDelta(baseline, current, w));
+  ASSERT_EQ(w.size(), 36u);
+
+  const std::array<uint8_t, 36> expected = {
+      0x67, 0x00, 0x00, 0x00,  // tick = 103
+      0x64, 0x00, 0x00, 0x00,  // baseline_tick = 100
+      0x03, 0x00, 0x00, 0x00,  // present_mask = 0b11
+      0x02, 0x00, 0x00, 0x00,  // changed_mask = 0b10
+      0x00, 0x00, 0x00, 0x40,  // x = 2.0f
+      0x00, 0x00, 0x00, 0x00,  // y = 0.0f
+      0x00, 0x00, 0x00, 0x00,  // vx = 0.0f
+      0x00, 0x00, 0x00, 0x00,  // vy = 0.0f
+      0x00, 0x00, 0x00, 0x3F,  // radius = 0.5f
+  };
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(static_cast<uint8_t>(buf[i]), expected[i]) << "byte " << i;
+  }
+
+  ByteReader r(std::span<const std::byte>(buf).subspan(0, w.size()));
+  SnapshotDelta d{};
+  ASSERT_TRUE(decodeSnapshotDelta(r, d));
+  EXPECT_EQ(d.tick, 103u);
+  EXPECT_EQ(d.changed_mask, 0b10u);
+  EXPECT_EQ(d.records[0].id, 2u);
+  EXPECT_FLOAT_EQ(d.records[0].x, 2.0f);
+}
+
 }  // namespace
 }  // namespace net
