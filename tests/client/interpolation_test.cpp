@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "sim/sim.h"
+
 namespace client {
 namespace {
 
@@ -50,6 +52,57 @@ TEST(InterpolatorTest, NudgesSmallDriftAndSnapsLargeDrift) {
   interp.observe(200);
   EXPECT_EQ(interp.renderTick(), 194u);
   EXPECT_EQ(interp.snaps(), 1u);
+}
+
+TEST(InterpolatorTest, InterpolatesBetweenBracketingSnapshots) {
+  net::SnapshotRing ring;
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 100;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 104;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 10.0f, -4.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+
+  Interpolator interp;
+  interp.observe(108);
+  ASSERT_EQ(interp.renderTick(), 102u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(interp.sample(ring, 9, x, y));
+  EXPECT_EQ(x, 5.0f);
+  EXPECT_EQ(y, -2.0f);
+
+  net::SnapshotRing ring2;
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 100;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring2.store(s);
+  }
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 103;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 3.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring2.store(s);
+  }
+
+  Interpolator interp2;
+  interp2.observe(107);
+  ASSERT_EQ(interp2.renderTick(), 101u);
+
+  float x2 = 0.0f, y2 = 0.0f;
+  ASSERT_TRUE(interp2.sample(ring2, 9, x2, y2));
+  EXPECT_NEAR(x2, 1.0f, 1e-5f);
 }
 
 }  // namespace
