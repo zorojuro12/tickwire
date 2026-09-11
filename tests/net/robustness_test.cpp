@@ -162,14 +162,17 @@ TEST(RobustnessTest, RandomByteBuffersNeverCrashADecoder) {
   // the buffer so corrupted trials actually reach a payload decoder (see
   // commit message), produces zero InputCommand-length (kHeaderBytes +
   // kInputBytes byte) matches in 20,000 trials -- a statistical accident of
-  // this exact seed, not a decoder defect. Same for the P1-era seed 2, which
-  // reliably produced matches at the old 41-byte InputCommand length but not
-  // the new 49-byte one added in P2's wire-format amendment. Substituted
-  // seed 1, computed (and confirmed against the actual build) to reliably
-  // produce matches at both InputCommand and WorldSnapshot payload shapes;
-  // recorded per docs/project-history.md P1/P2 findings, same escape hatch
-  // the plan authorizes for Task 6 Checkpoint 4's jitter-inversion seed.
-  std::mt19937_64 rng{1u};
+  // this exact seed, not a decoder defect. P1-era seed 2 then stopped
+  // producing a hit once P2 widened InputCommand to 49 bytes, and its
+  // replacement (seed 1) in turn stopped once P4's kSnapshotDelta widened
+  // kMaxMsgType from 5 to 6 -- `1 + rng() % kMaxMsgType` draws a different
+  // value and shifts every subsequent draw, so the type distribution this
+  // sweep depends on changes with the message-type count. Re-searched
+  // against the actual decoders after that change; seed 2 reliably produces
+  // a hit again. Recorded per docs/project-history.md P1/P2/P4 findings,
+  // same escape hatch the plan authorizes for Task 6 Checkpoint 4's
+  // jitter-inversion seed: a fixed seed is for reproducibility, not sacred.
+  std::mt19937_64 rng{2u};
   bool reached_payload_decoder = false;
   bool any_payload_decoded = false;
 
