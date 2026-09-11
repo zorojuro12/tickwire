@@ -1,4 +1,5 @@
 #include <array>
+#include <bit>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -210,7 +211,7 @@ TEST(RobustnessTest, RandomByteBuffersNeverCrashTheSnapshotDeltaDecoder) {
     if (!decodeSnapshotDelta(r, d)) continue;
 
     EXPECT_EQ(d.changed_mask & ~d.present_mask, 0u) << "trial " << trial;
-    EXPECT_EQ(d.record_count, static_cast<uint32_t>(__builtin_popcount(d.changed_mask)))
+    EXPECT_EQ(d.record_count, static_cast<uint32_t>(std::popcount(d.changed_mask)))
         << "trial " << trial;
   }
 }

@@ -1,5 +1,6 @@
 #include "net/snapshot_delta.h"
 
+#include <bit>
 #include <cmath>
 
 namespace net {
@@ -66,7 +67,7 @@ bool decodeSnapshotDelta(ByteReader& r, SnapshotDelta& out) {
   d.baseline_tick = r.u32();
   d.present_mask = r.u32();
   d.changed_mask = r.u32();
-  d.record_count = static_cast<uint32_t>(__builtin_popcount(d.changed_mask));
+  d.record_count = static_cast<uint32_t>(std::popcount(d.changed_mask));
 
   if (d.changed_mask & ~d.present_mask) return false;
 
