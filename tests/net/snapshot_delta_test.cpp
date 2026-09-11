@@ -201,5 +201,39 @@ TEST(SnapshotDeltaTest, RejectsChangedMaskNotSubsetOfPresentMask) {
   EXPECT_EQ(d.tick, 0xDEADBEEFu);
 }
 
+TEST(SnapshotDeltaTest, RejectsPayloadLengthDisagreeingWithChangedMask) {
+  auto buildFixed = [](uint32_t num_records) {
+    std::array<std::byte, kMaxPacket> buf{};
+    ByteWriter w(buf);
+    w.u32(103);
+    w.u32(100);
+    w.u32(0b11);
+    w.u32(0b11);
+    for (uint32_t rec = 0; rec < num_records; ++rec) {
+      w.f32(1.0f);
+      w.f32(2.0f);
+      w.f32(0.0f);
+      w.f32(0.0f);
+      w.f32(sim::kPlayerRadius);
+    }
+    return std::pair{buf, w.size()};
+  };
+
+  {
+    // too few: one record instead of two
+    auto [buf, size] = buildFixed(1);
+    ByteReader r(std::span<const std::byte>(buf).subspan(0, size));
+    SnapshotDelta d{};
+    EXPECT_FALSE(decodeSnapshotDelta(r, d));
+  }
+  {
+    // too many: three records instead of two -- trailing bytes
+    auto [buf, size] = buildFixed(3);
+    ByteReader r(std::span<const std::byte>(buf).subspan(0, size));
+    SnapshotDelta d{};
+    EXPECT_FALSE(decodeSnapshotDelta(r, d));
+  }
+}
+
 }  // namespace
 }  // namespace net

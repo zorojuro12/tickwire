@@ -81,6 +81,7 @@ bool decodeSnapshotDelta(ByteReader& r, SnapshotDelta& out) {
   }
 
   if (!r.ok()) return false;
+  if (r.remaining() != 0) return false;
 
   out = d;
   return true;
