@@ -6,13 +6,13 @@ description: Detect a project's stack and produce a dry-run ECC onboarding plan 
 
 Create a safe, reviewable ECC onboarding plan for the current project. This command should start in dry-run mode and only write files after explicit user approval.
 
-> **call_it-specific note:** this command's scripts and manifests live in the
+> **Tickwire-specific note:** this command's scripts and manifests live in the
 > ECC checkout, not in this repo. Run them by absolute path against
 > `/home/chikara/projects/ECC` (e.g. `node /home/chikara/projects/ECC/scripts/install-plan.js ...`)
 > rather than the bare `node scripts/install-plan.js` shown below, since
-> `call_it`'s working directory isn't inside the ECC repo. Node resolves each
+> Tickwire's working directory isn't inside the ECC repo. Node resolves each
 > script's own `require()`s relative to the script file, so running it by
-> absolute path from `call_it` works correctly.
+> absolute path from Tickwire works correctly.
 
 ## Usage
 
@@ -86,11 +86,12 @@ If the user wants a `CLAUDE.md` starter, generate it separately from the install
 
 Never replace an existing `CLAUDE.md` without showing a diff and receiving approval.
 
-For `call_it` specifically: this minimal command-focused output is a starting
+For Tickwire specifically: this minimal command-focused output is a starting
 scaffold only, not the finished doc — layer in the "why" content (non-obvious
 invariants, rejected alternatives, gotchas) from
-`docs/specs/2026-08-21-callit-design.md`, `docs/plans/2026-08-21-implementation-plan.md`,
-and `journal/` entries afterward. See `docs/dev-workflow-guide.md` §3.
+`docs/specs/2026-09-04-tickwire-design.md` and the implementation plan
+afterward. See `docs/dev-workflow-guide.md` §3. Run this only **after P0
+exists** — never from the spec alone.
 
 ## Related
 

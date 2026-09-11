@@ -1,0 +1,140 @@
+cmake_minimum_required(VERSION 3.21)
+project(tickwire CXX)
+
+include(FetchContent)
+FetchContent_Declare(googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG release-1.12.1)
+FetchContent_MakeAvailable(googletest)
+
+set(TW_SANITIZER "" CACHE STRING "address,undefined | thread | (empty)")
+
+add_library(tickwire_sim_flags INTERFACE)
+target_compile_features(tickwire_sim_flags INTERFACE cxx_std_20)
+target_compile_options(tickwire_sim_flags INTERFACE
+  -march=x86-64 -ffp-contract=off -Wall -Wextra -Werror)
+if(TW_SANITIZER)
+  target_compile_options(tickwire_sim_flags INTERFACE
+    -fsanitize=${TW_SANITIZER} -g -fno-omit-frame-pointer)
+  target_link_options(tickwire_sim_flags INTERFACE -fsanitize=${TW_SANITIZER})
+endif()
+
+add_library(libsim STATIC src/sim/sim.cpp src/sim/world.cpp)
+target_include_directories(libsim PUBLIC src)
+target_link_libraries(libsim PUBLIC tickwire_sim_flags)
+
+add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
+target_link_libraries(libnet PUBLIC libsim)
+
+add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp)
+target_link_libraries(libserver PUBLIC libnet)
+
+add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp)
+target_include_directories(libclient PUBLIC src)
+target_link_libraries(libclient PUBLIC libnet)
+
+enable_testing()
+
+function(tw_add_test name)
+  add_executable(${name} ${ARGN})
+  target_include_directories(${name} PRIVATE tests)
+  target_link_libraries(${name} PRIVATE libserver libclient GTest::gtest_main)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_executable(smoke_test tests/smoke_test.cpp)
+target_link_libraries(smoke_test PRIVATE libsim GTest::gtest_main)
+add_test(NAME smoke_test COMMAND smoke_test)
+
+add_executable(world_test tests/sim/world_test.cpp)
+target_link_libraries(world_test PRIVATE libsim GTest::gtest_main)
+add_test(NAME world_test COMMAND world_test)
+
+tw_add_test(bytes_test tests/net/bytes_test.cpp)
+tw_add_test(protocol_test tests/net/protocol_test.cpp)
+tw_add_test(loopback_test tests/net/loopback_test.cpp)
+tw_add_test(udp_test tests/net/udp_test.cpp)
+tw_add_test(simulated_test tests/net/simulated_test.cpp)
+tw_add_test(robustness_test tests/net/robustness_test.cpp)
+tw_add_test(framing_test tests/net/framing_test.cpp)
+tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
+tw_add_test(session_test tests/server/session_test.cpp)
+tw_add_test(input_buffer_test tests/server/input_buffer_test.cpp)
+tw_add_test(server_test tests/server/server_test.cpp)
+tw_add_test(timer_test tests/server/timer_test.cpp)
+tw_add_test(client_test tests/client/client_test.cpp)
+tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
+tw_add_test(prediction_test tests/client/prediction_test.cpp)
+tw_add_test(convergence_test tests/client/convergence_test.cpp)
+tw_add_test(view_test tests/client/view_test.cpp)
+
+if(TW_SANITIZER MATCHES "address")
+  add_executable(fault_uaf tests/faults/uaf.cpp)
+  target_link_libraries(fault_uaf PRIVATE tickwire_sim_flags)
+  add_test(NAME asan_detects_uaf COMMAND fault_uaf)
+  set_tests_properties(asan_detects_uaf PROPERTIES
+    PASS_REGULAR_EXPRESSION "heap-use-after-free")
+
+  add_executable(fault_ovf tests/faults/ovf.cpp)
+  target_link_libraries(fault_ovf PRIVATE tickwire_sim_flags)
+  add_test(NAME ubsan_detects_overflow COMMAND fault_ovf)
+  set_tests_properties(ubsan_detects_overflow PROPERTIES
+    PASS_REGULAR_EXPRESSION "signed integer overflow")
+endif()
+
+if(TW_SANITIZER MATCHES "thread")
+  add_executable(fault_race tests/faults/race.cpp)
+  target_link_libraries(fault_race PRIVATE tickwire_sim_flags)
+  add_test(NAME tsan_detects_race COMMAND fault_race)
+  set_tests_properties(tsan_detects_race PROPERTIES
+    PASS_REGULAR_EXPRESSION "data race")
+endif()
+
+add_executable(tw_server apps/tw_server.cpp)
+target_link_libraries(tw_server PRIVATE libserver)
+add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
+set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
+add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
+set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+
+add_executable(tw_loadclient apps/tw_loadclient.cpp)
+target_link_libraries(tw_loadclient PRIVATE libclient libserver)
+
+add_test(NAME e2e_udp
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
+          "$<TARGET_FILE:tw_server>" "$<TARGET_FILE:tw_loadclient>")
+# No PASS_REGULAR_EXPRESSION: CTest treats that property as the SOLE
+# pass/fail signal once set, ignoring the process exit code entirely -- a
+# script-level `exit 1` (e.g. the lead= check below) would be silently
+# overridden by a regex match elsewhere in the output. Exit code alone
+# (set -e/pipefail in the script, plus tw_loadclient's own
+# joined==players return value) is the pass/fail signal here.
+
+add_executable(digest_dump_a tools/digest_dump.cpp)
+target_link_libraries(digest_dump_a PRIVATE libsim)
+
+add_executable(digest_dump_b tools/digest_dump.cpp)
+target_link_libraries(digest_dump_b PRIVATE libsim)
+
+add_test(NAME determinism_two_binaries
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/determinism-test.sh"
+          "$<TARGET_FILE:digest_dump_a>" "$<TARGET_FILE:digest_dump_b>"
+          "${CMAKE_SOURCE_DIR}/scripts/compare-digests.sh")
+
+option(TW_BUILD_GUI "Build the raylib client" OFF)
+if(TW_BUILD_GUI)
+  FetchContent_Declare(raylib
+    GIT_REPOSITORY https://github.com/raysan5/raylib.git
+    GIT_TAG 4.5.0)
+  set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(raylib)
+
+  # raylib's own warnings must not fail our build: -Wall -Wextra -Werror
+  # come from tickwire_sim_flags, which raylib does not link, so applying
+  # them only to our targets (not globally) keeps raylib's build silent.
+  add_executable(tw_client apps/tw_client.cpp)
+  target_link_libraries(tw_client PRIVATE libclient libserver raylib)
+  add_test(NAME client_selftest COMMAND tw_client --selftest)
+  set_tests_properties(client_selftest PROPERTIES SKIP_RETURN_CODE 77)
+endif()

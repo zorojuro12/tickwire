@@ -25,12 +25,30 @@ Project design doc: [`docs/specs/2026-09-04-tickwire-design.md`](specs/2026-09-0
 
 ## 2. Turning a spec into an implementation plan
 
-**Default path: `writing-plans` → `executing-plans`.** For anything substantial —
-a phase, a real feature — write the task/step plan first, then execute it. You get
-a reviewable artifact before code starts, and commit boundaries are fixed in the
-plan rather than decided ad hoc mid-session.
+**Two layers, don't confuse them.** `/impl-plan` is the *architectural* layer: run
+once per project (or per major subsystem) to resolve open design questions and
+produce the phase table. `writing-plans` is the *execution* layer: run once per
+phase, right before that phase's branch starts, to break one phase into numbered
+tasks with exact files, interfaces, and test → implement → verify → commit steps.
+**Don't re-run `/impl-plan` per phase.**
+
+> **Status: `/impl-plan` has NOT been run for Tickwire.** The P0–P7 table currently
+> exists only as a table inside the design doc. It needs to become a real
+> implementation plan that resolves the open architectural questions before P0's
+> phase plan is written — `libsim`'s exact API surface and link model, fixed-point
+> vs floats, the transport interface shape, and the queue's memory-ordering
+> contract. Those are architecture, not execution, and answering them inside a
+> phase plan is how they get answered badly.
 
 Plans live in **`docs/plans/`**, named `YYYY-MM-DD-phase-N-slug.md`.
+
+| Situation | Use |
+|---|---|
+| Spec is approved, need the phase table and the open architectural questions resolved | `/impl-plan` command — restates requirements, assesses risk, produces a step-by-step plan, **waits for CONFIRM before touching code** (renamed from `/plan` to avoid colliding with Claude Code's built-in Plan Mode) |
+| About to start a phase from the plan's phase table, need it broken into committable tasks | `writing-plans` skill → saves to `docs/plans/` → hands off to `executing-plans` |
+| Building a standalone feature that was never one of the phases | `writing-plans` directly — no need to route through `/impl-plan` unless it raises genuinely new architectural questions |
+| Plan needs deeper multi-file architectural reasoning first | `planner` agent, or `code-architect` once there's code to pattern-match against |
+| End-to-end gated build as one wrapped flow, no standalone plan artifact wanted | the `orch-*` commands — the alternative to `writing-plans` when a reviewable plan isn't needed |
 
 **Undecided, deliberately:** the spec-driven vs code-driven plan format. CallIt
 decided spec-driven because it executes inline. Tickwire has `delegating-plan-tasks`
@@ -75,12 +93,91 @@ to fall back on.
 | Installing stack-specific rule packs | Copy from `/home/chikara/projects/ECC/rules/<pack>` into `.claude/rules/ecc/`. **Stagger per-phase** — rule dirs load as always-on full text into every turn, unlike skills. |
 | Pulling in stack-specific skills | Cheap (one line in the listing until invoked) — install eagerly, project-locally. |
 
-**Installed now:** `rules/ecc/common/` + `rules/ecc/cpp/`; the `cpp-coding-standards`
-and `cpp-testing` skills; `cpp-reviewer` and `cpp-build-resolver` agents;
-`/cpp-build`, `/cpp-test`, `/cpp-review` commands.
+**Installed now (as of P0):** `rules/ecc/common/` + `rules/ecc/cpp/`; the 9 Bucket-1
+staple skills (`agentic-engineering`, `ai-first-engineering`,
+`architecture-decision-records`, `codebase-onboarding`, `continuous-learning-v2`,
+`error-handling`, `git-workflow`, `security-review`, `verification-loop`) plus
+`brainstorming`, `writing-plans`/`executing-plans`, `delegating-plan-tasks`,
+`dispatching-parallel-agents`, `finishing-a-development-branch`, `journal`,
+`using-git-worktrees`, `writing-skills`, and the C++ pack (`cpp-coding-standards`,
+`cpp-testing`); the 15 Bucket-1 staple agents plus `cpp-reviewer` and
+`cpp-build-resolver`; the 14 Bucket-1 staple commands plus `/cpp-build`,
+`/cpp-test`, `/cpp-review`, `/project-init`.
 
-**Deliberately not installed** (add when a phase needs them): `docker-patterns`,
-`api-design`. Go / React / TypeScript / Postgres / Redis packs are not applicable.
+### 3a. Phase-by-phase import map
+
+Cross-referenced against `~/projects/ecc-survey.md`'s three-bucket skill/agent/
+command inventory and the P0–P7 table in the design doc. Lists only what's **not**
+already installed, so this table shrinks over time rather than restating 3's
+"installed now" list.
+
+| Phase | Not yet imported | Import trigger |
+|---|---|---|
+| P1 — wire protocol, serialization, transport | Nothing new. `security-review` (already installed) is the applicable skill the moment untrusted-input parsing exists — no ECC skill covers binary-protocol design specifically. | — |
+| P2 — authoritative server, raylib client, first demo | `docker-patterns` skill | Once the server is packaged as a container for the demo/README, not before — P0's `Dockerfile` is a *dev toolchain* image, not the shipped artifact, so this wasn't a P0 need. |
+| P2 — raylib integration specifically | `documentation-lookup` skill + `docs-lookup` agent (Context7 MCP) | First external-library integration in the project (raylib). Pull in when starting that work, not before — nothing to look up yet. |
+| P3 — prediction/reconciliation/clock-sync | Nothing available. No ECC skill covers netcode-specific prediction/reconciliation; the design doc already names the correct references (Gaffer On Games, Valve Source Multiplayer Networking) instead of a packaged skill. | — (confirmed gap, not an oversight) |
+| P4 — entity interpolation, snapshot delta | Nothing available, same reason as P3. | — |
+| P5 — threading + lock-free SPSC queue benchmark, headline numbers table | **`benchmark`, `benchmark-methodology`, `benchmark-optimization-loop` skills** (Bucket 3, meta/orchestration) | Start of P5 — this is the clearest concrete gap in the whole map. P5's entire purpose is producing the tick-jitter/throughput numbers table; `performance-optimizer` (already installed) profiles, but these three skills are what structure the benchmark methodology and its optimization loop. |
+| P6 — lag compensation | Nothing available — domain-specific, external references again. | — |
+| P7 — stretch (io_uring / WebSocket gateway) | Nothing available — no ECC skill for io_uring or raw WebSocket protocol work. | — |
+| Any phase, once `.claude/` surface has grown | `security-scan` **skill** (distinct from the already-installed `/security-scan` **command** — the skill audits `.claude/` config itself for misconfig/leaked secrets; the command audits code) | Optional hygiene layer, not urgent — worth adding once the agent/skill/command surface is large enough that a misconfiguration would be easy to miss by eye. |
+
+**Confirmed not applicable — don't re-litigate these:** `api-design` (no REST
+surface, raw UDP), `e2e-testing`/`e2e-runner` (Playwright, browser-only — the
+client is native raylib), `accessibility` (no web UI), `design-system` (no web
+UI), `kubernetes-patterns` and `deployment-patterns` (design doc: "Live UDP
+hosting unsupported on most PaaS — Accepted. Local demo plus recorded video."),
+`database-reviewer`/`a11y-architect` (no DB, no web UI). Go / React / TypeScript
+/ Postgres / Redis rule packs are likewise not applicable to this stack.
+
+**Optional, not phase-gated:** `cost-tracking` skill (Claude Code spend
+monitoring — a personal-workflow choice, not a project need); `/loop-start`/
+`/loop-status` (only if long-running benchmark or CI-watch loops at P5 make
+autonomous looping worth it).
+
+### 3b. `CLAUDE.md` shape — findings from ECC's example templates
+
+Surveyed `/home/chikara/projects/ECC/examples/*.md` (9 English-language project
+templates: generic, Next.js/SaaS, Django, Rust API, Go microservice, Rails,
+Laravel, HarmonyOS, plus a user-level example) and ECC's own real-world
+`CLAUDE.md`. None targets C++ or a game/netcode stack — Tickwire has no
+template to crib from directly, which matches the "write it after P0 exists"
+decision above being self-originated rather than copied.
+
+**Consistent shape across every project-level example:** Project Overview →
+(often) Prompt Defense Baseline → Critical Rules (language conventions, error
+handling, code style) → File Structure → Key Patterns (short code snippets per
+architecture layer — handler/service/repository in the Rust and Go examples) →
+Environment Variables → Testing Strategy → ECC Workflow (a table mapping
+lifecycle stages to slash commands) → Git Workflow.
+
+**What Tickwire's current `CLAUDE.md` has vs. the template shape:** it has
+Critical Rules (build/container/float-flag/language/interface-boundary
+constraints), a condensed Testing section, and a condensed Git section — all
+*verified*, per the P0 plan's mandate. It deliberately omits Project Overview,
+File Structure, Key Patterns, Environment Variables, and an ECC Workflow
+command table, because none of those existed as verified reality at the end of
+P0 (one `.cpp`/`.h` pair, no architecture layers, no env vars, no
+phase-specific command usage pattern yet).
+
+**When to add each, following the same "verified reality only" rule that
+governed writing it in the first place:**
+
+| Section | Add when | Not before, because |
+|---|---|---|
+| Project Overview | Any time — low risk, it's a one-paragraph restatement of the design doc's opening | — |
+| ECC Workflow (command table) | Any time — commands are already installed and stable | — |
+| File Structure | After P1 — once `src/` holds more than `src/sim/` (transport, protocol/serialization land) | Before P1 it's just `src/sim/`, not worth a tree diagram |
+| Key Patterns | After P2 — once there's a real client/server architectural split to show a snippet of | P0/P1 have no layered architecture yet to pattern-match |
+| Environment Variables | Only if/when actual env-driven config appears (e.g. server port, log level) — plausibly P2 | Nothing reads an env var yet; `TW_SANITIZER` is a CMake cache var, not one |
+
+**Prompt Defense Baseline:** present in every generic/meta example (including
+ECC's own `CLAUDE.md`) but absent from Tickwire's. It's boilerplate against
+prompt injection from untrusted repo content or external contributors — lower
+priority for a solo, local-only project than for a multi-contributor plugin
+repo like ECC itself. **Revisit if the repo ever goes public with external
+issues/PRs**, not before.
 
 ## 4. Implementation (TDD loop)
 
@@ -88,18 +185,18 @@ and `cpp-testing` skills; `cpp-reviewer` and `cpp-build-resolver` agents;
 |---|---|
 | **Building a phase (the default)** | `writing-plans` → `executing-plans` |
 | Any new feature/bug fix — write-tests-first | `tdd-guide` agent (RED → GREEN → IMPROVE) |
-| Fixing a bug — reproduce as a failing test first | `orch-fix-defect` |
-| Behavior-preserving refactor | `orch-refine-code` |
-| Build/compile errors block progress | `build-fix` skill, or the **`cpp-build-resolver`** agent |
-| Removing dead code | `refactor-clean` / `refactor-cleaner` |
+| Fixing a bug — reproduce as a failing test first | `/orch-fix-defect` command |
+| Behavior-preserving refactor | `/orch-refine-code` command |
+| Build/compile errors block progress | `/build-fix` command, or the **`cpp-build-resolver`** agent |
+| Removing dead code | `/refactor-clean` command / `refactor-cleaner` agent |
 
 ## 5. Review (before every merge to `dev`)
 
 | Situation | Use |
 |---|---|
-| General quality review after writing code | `code-review` skill / `code-reviewer` agent |
+| General quality review after writing code | `/code-review` command / `code-reviewer` agent |
 | **C++ idiom, RAII, lifetime, move-semantics review** | **`cpp-reviewer` agent** |
-| **Any phase touching the network surface** | **`security-reviewer` agent — mandatory.** The UDP deserializer parses untrusted input from an unauthenticated source; a malformed packet reaching a hand-rolled parser is this project's highest-severity surface. |
+| **Any phase touching the network surface** | **`security-review` skill and/or the `security-reviewer` agent — mandatory.** The UDP deserializer parses untrusted input from an unauthenticated source; a malformed packet reaching a hand-rolled parser is this project's highest-severity surface. |
 | Swallowed errors / bad fallbacks | `silent-failure-hunter` agent |
 | Type/struct design enforcing invariants | `type-design-analyzer` agent |
 | Comment accuracy/rot | `comment-analyzer` agent |
@@ -130,6 +227,7 @@ needed.
 | Situation | Use |
 |---|---|
 | End-of-session log | `journal` skill, or hand-written — decide per session |
+| A decision got made, reversed, or something surprised us running the toolchain | [`docs/project-history.md`](project-history.md) — the skimmable cross-phase timeline. Distinct from the journal (session narrative) and the specs (full rationale) — this is the short version, one entry per load-bearing event, linking back to the source doc instead of restating it. |
 | Updating README/codemaps | `doc-updater` agent |
 
 ## 8. Git & shipping
@@ -150,7 +248,7 @@ Sub-task-level branching was considered and rejected as overhead for solo work.
 | Committing | `type: description` per `.claude/rules/ecc/common/git-workflow.md`, one commit per checkpoint |
 | Finishing a phase | `finishing-a-development-branch` skill |
 | Opening a PR | Not used — solo, self-merge |
-| Scanning for leaked secrets before pushing | `security-scan` skill |
+| Scanning for leaked secrets before pushing | `/security-scan` command |
 
 **One commit per checkpoint, chained behind its test with `&&`** so a red test makes
 the commit unreachable rather than merely inadvisable. Never `;`, never separate
