@@ -29,7 +29,7 @@ target_link_libraries(libnet PUBLIC libsim)
 add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp)
 target_link_libraries(libserver PUBLIC libnet)
 
-add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp)
+add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp src/client/interpolation.cpp)
 target_include_directories(libclient PUBLIC src)
 target_link_libraries(libclient PUBLIC libnet)
 
@@ -69,6 +69,7 @@ tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
 tw_add_test(prediction_test tests/client/prediction_test.cpp)
 tw_add_test(convergence_test tests/client/convergence_test.cpp)
 tw_add_test(view_test tests/client/view_test.cpp)
+tw_add_test(interpolation_test tests/client/interpolation_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
