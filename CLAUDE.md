@@ -55,6 +55,14 @@ plan execution, not assumed.
 - **CMake floor is 3.21+ (the image pins 3.28.4).** On Debian's packaged
   CMake 3.18, `ctest --test-dir` runs **zero tests and exits 0** — a silent
   green. Never install CMake from apt in the image.
+- **`ctest` does not build — always `cmake --build` first.** The second silent
+  green: a bare `ctest -R foo_test` runs the *previously built* binary, so a
+  newly written test case is simply absent from it and the run passes; a
+  brand-new target matches nothing and `ctest` exits 0. `scripts/ci.sh` builds
+  before every `ctest` for this reason, and so must anything run by hand:
+  `scripts/tw bash -c "cmake --build build/plain -j8 && ctest --test-dir build/plain -R <regex> --output-on-failure"`.
+  This is what makes a TDD checkpoint's "expect FAIL" meaningful — bare `ctest`
+  cannot produce the compile error a red step is supposed to show.
 - Configure/build/test three configurations as needed: `build/plain`,
   `build/asan` (`-DTW_SANITIZER=address,undefined`), `build/tsan`
   (`-DTW_SANITIZER=thread`). `scripts/ci.sh` runs all three plus the
