@@ -279,7 +279,10 @@ class Client {
       return;
     }
     sim::WorldSnapshot reconstructed{};
-    if (!net::applySnapshotDelta(*baseline, d, reconstructed)) return;
+    if (!net::applySnapshotDelta(*baseline, d, reconstructed)) {
+      ++deltas_dropped_;
+      return;
+    }
     ++deltas_applied_;
     acceptSnapshot(reconstructed, h, now_ms);
   }

@@ -937,5 +937,41 @@ TEST(ClientTest, RejectsASnapshotWhosePayloadTickDisagreesWithItsHeader) {
   EXPECT_EQ(c.latestSnapshotTick(), 100u);
 }
 
+TEST(ClientTest, CountsADroppedDeltaEvenWhenItsBaselineIsHeld) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  // Baseline holds only player 1.
+  injectSnapshot(*tp, 100, 5000, onePlayerSnapshot(100, 0.0f, 0.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  // A delta naming player 2 as present-but-unchanged (bit set in
+  // present_mask, clear in changed_mask) with a baseline the client
+  // genuinely holds (100) -- applySnapshotDelta must fail, since player 2
+  // has no baseline record to copy, not because the baseline lookup
+  // itself failed.
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  dw.u32(103);        // tick
+  dw.u32(100);         // baseline_tick -- held
+  dw.u32(0b10);        // present_mask -- player 2 only
+  dw.u32(0);           // changed_mask -- claimed unchanged
+  ASSERT_TRUE(dw.ok());
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.deltasDropped(), 1u);
+  EXPECT_EQ(c.deltasApplied(), 0u);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
+}
+
 }  // namespace
 }  // namespace client
