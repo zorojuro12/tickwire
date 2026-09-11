@@ -14,6 +14,16 @@ void Interpolator::observe(uint32_t newest_snapshot_tick) noexcept {
     have_ = true;
     return;
   }
+
+  const int64_t error = static_cast<int64_t>(target) - static_cast<int64_t>(render_tick_);
+  if (error >= kInterpSnapErrorTicks || error <= -kInterpSnapErrorTicks) {
+    render_tick_ = target;
+    ++snaps_;
+  } else if (error > 0) {
+    ++render_tick_;
+  } else if (error < 0) {
+    if (render_tick_ > 0) --render_tick_;
+  }
 }
 
 uint32_t Interpolator::renderTick() const noexcept { return render_tick_; }

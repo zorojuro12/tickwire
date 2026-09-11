@@ -25,5 +25,32 @@ TEST(InterpolatorTest, FirstObservationSeedsTheTimelineBehindTheSnapshot) {
   EXPECT_EQ(interp2.renderTick(), 0u);
 }
 
+TEST(InterpolatorTest, NudgesSmallDriftAndSnapsLargeDrift) {
+  Interpolator interp;
+
+  interp.observe(100);
+  EXPECT_EQ(interp.renderTick(), 94u);
+
+  interp.advance();
+  interp.advance();
+  interp.advance();
+  interp.observe(103);
+  EXPECT_EQ(interp.renderTick(), 97u);
+  EXPECT_EQ(interp.snaps(), 0u);
+
+  interp.advance();
+  interp.advance();
+  interp.advance();
+  interp.observe(103);
+  EXPECT_EQ(interp.renderTick(), 99u);
+
+  interp.observe(103);
+  EXPECT_EQ(interp.renderTick(), 98u);
+
+  interp.observe(200);
+  EXPECT_EQ(interp.renderTick(), 194u);
+  EXPECT_EQ(interp.snaps(), 1u);
+}
+
 }  // namespace
 }  // namespace client
