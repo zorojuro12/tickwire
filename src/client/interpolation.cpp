@@ -55,13 +55,24 @@ bool Interpolator::sample(const net::SnapshotRing& ring, uint32_t player_id, flo
   if (a != nullptr && b != nullptr) {
     const sim::PlayerState* pa = findById(*a, player_id);
     const sim::PlayerState* pb = findById(*b, player_id);
-    if (pa == nullptr || pb == nullptr) return false;
 
-    const float alpha = static_cast<float>(render_tick_ - a->tick) /
-                         static_cast<float>(b->tick - a->tick);
-    x = pa->x + (pb->x - pa->x) * alpha;
-    y = pa->y + (pb->y - pa->y) * alpha;
-    return true;
+    if (pa != nullptr && pb != nullptr) {
+      const float alpha = static_cast<float>(render_tick_ - a->tick) /
+                           static_cast<float>(b->tick - a->tick);
+      x = pa->x + (pb->x - pa->x) * alpha;
+      y = pa->y + (pb->y - pa->y) * alpha;
+      return true;
+    }
+    // Joined mid-window (in b, not a): held at its first known position
+    // rather than lerped from a position it never had. Departed mid-window
+    // (in a, not b): gone -- must stop being drawn immediately rather than
+    // lingering for the length of the window.
+    if (pb != nullptr) {
+      x = pb->x;
+      y = pb->y;
+      return true;
+    }
+    return false;
   }
 
   // Starved: no extrapolation, deliberately -- Decision 5 (freeze at the

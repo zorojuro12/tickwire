@@ -147,5 +147,34 @@ TEST(InterpolatorTest, FreezesAtTheNewestSnapshotRatherThanExtrapolating) {
   }
 }
 
+TEST(InterpolatorTest, HandlesPlayersAppearingAndDisappearingMidWindow) {
+  net::SnapshotRing ring;
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 100;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{8, 1.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 104;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{7, 9.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+
+  Interpolator interp;
+  interp.observe(108);
+  ASSERT_EQ(interp.renderTick(), 102u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(interp.sample(ring, 7, x, y));
+  EXPECT_EQ(x, 9.0f);
+
+  EXPECT_FALSE(interp.sample(ring, 8, x, y));
+  EXPECT_FALSE(interp.sample(ring, 30, x, y));
+}
+
 }  // namespace
 }  // namespace client
