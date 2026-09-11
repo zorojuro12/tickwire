@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
 #include "net/transport.h"
 #include "sim/sim.h"
 
@@ -154,6 +155,63 @@ TEST(RobustnessTest, EveryTruncationOfAFullSnapshotIsRejectedWithoutCrashing) {
     EXPECT_FALSE(ok) << "prefix " << prefix;
     EXPECT_EQ(h.tick, 0xAAAAAAAAu) << "prefix " << prefix;
     EXPECT_EQ(payload.tick, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+}
+
+std::vector<std::byte> buildGoldenDeltaPayload() {
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 0x64;
+  baseline.count = 2;
+  baseline.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+  baseline.players[1] = sim::PlayerState{2, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+
+  sim::WorldSnapshot current{};
+  current.tick = 0x67;
+  current.count = 2;
+  current.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+  current.players[1] = sim::PlayerState{2, 2.0f, 0.0f, 0.0f, 0.0f, 0.5f};
+
+  std::vector<std::byte> buf(kSnapshotDeltaFixedBytes + kDeltaRecordBytes);
+  ByteWriter w(buf);
+  EXPECT_TRUE(encodeSnapshotDelta(baseline, current, w));
+  EXPECT_EQ(w.size(), buf.size());
+  return buf;
+}
+
+TEST(RobustnessTest, EveryTruncationOfASnapshotDeltaIsRejectedWithoutCrashing) {
+  const std::vector<std::byte> full = buildGoldenDeltaPayload();
+  ASSERT_EQ(full.size(), 36u);
+
+  {
+    ByteReader r(full);
+    SnapshotDelta d;
+    EXPECT_TRUE(decodeSnapshotDelta(r, d));
+  }
+
+  for (size_t prefix = 0; prefix < full.size(); ++prefix) {
+    ByteReader r(std::span<const std::byte>(full).subspan(0, prefix));
+    SnapshotDelta d{};
+    d.tick = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeSnapshotDelta(r, d)) << "prefix " << prefix;
+    EXPECT_EQ(d.tick, 0xAAAAAAAAu) << "prefix " << prefix;
+  }
+}
+
+TEST(RobustnessTest, RandomByteBuffersNeverCrashTheSnapshotDeltaDecoder) {
+  std::mt19937_64 rng{2u};
+
+  for (int trial = 0; trial < 20000; ++trial) {
+    const size_t len = static_cast<size_t>(rng() % 129);
+    std::vector<std::byte> bytes(len);
+    for (auto& b : bytes) b = static_cast<std::byte>(rng() & 0xFFu);
+
+    ByteReader r(bytes);
+    SnapshotDelta d{};
+    if (!decodeSnapshotDelta(r, d)) continue;
+
+    EXPECT_EQ(d.changed_mask & ~d.present_mask, 0u) << "trial " << trial;
+    EXPECT_EQ(d.record_count, static_cast<uint32_t>(__builtin_popcount(d.changed_mask)))
+        << "trial " << trial;
   }
 }
 
