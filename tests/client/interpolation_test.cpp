@@ -105,5 +105,47 @@ TEST(InterpolatorTest, InterpolatesBetweenBracketingSnapshots) {
   EXPECT_NEAR(x2, 1.0f, 1e-5f);
 }
 
+TEST(InterpolatorTest, FreezesAtTheNewestSnapshotRatherThanExtrapolating) {
+  net::SnapshotRing ring;
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 100;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+  {
+    sim::WorldSnapshot s{};
+    s.tick = 103;
+    s.count = 1;
+    s.players[0] = sim::PlayerState{9, 3.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    ring.store(s);
+  }
+
+  {
+    Interpolator interp;
+    interp.observe(116);
+    ASSERT_EQ(interp.renderTick(), 110u);
+    float x = 0.0f, y = 0.0f;
+    ASSERT_TRUE(interp.sample(ring, 9, x, y));
+    EXPECT_EQ(x, 3.0f);
+  }
+  {
+    Interpolator interp;
+    interp.observe(101);
+    ASSERT_EQ(interp.renderTick(), 95u);
+    float x = 0.0f, y = 0.0f;
+    ASSERT_TRUE(interp.sample(ring, 9, x, y));
+    EXPECT_EQ(x, 0.0f);
+  }
+  {
+    Interpolator interp;
+    net::SnapshotRing empty_ring;
+    interp.observe(200);
+    float x = 0.0f, y = 0.0f;
+    EXPECT_FALSE(interp.sample(empty_ring, 9, x, y));
+  }
+}
+
 }  // namespace
 }  // namespace client

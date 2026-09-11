@@ -51,17 +51,37 @@ bool Interpolator::sample(const net::SnapshotRing& ring, uint32_t player_id, flo
 
   const sim::WorldSnapshot* a = ring.newestAtOrBefore(render_tick_);
   const sim::WorldSnapshot* b = ring.oldestAfter(render_tick_);
-  if (a == nullptr || b == nullptr) return false;
 
-  const sim::PlayerState* pa = findById(*a, player_id);
-  const sim::PlayerState* pb = findById(*b, player_id);
-  if (pa == nullptr || pb == nullptr) return false;
+  if (a != nullptr && b != nullptr) {
+    const sim::PlayerState* pa = findById(*a, player_id);
+    const sim::PlayerState* pb = findById(*b, player_id);
+    if (pa == nullptr || pb == nullptr) return false;
 
-  const float alpha = static_cast<float>(render_tick_ - a->tick) /
-                       static_cast<float>(b->tick - a->tick);
-  x = pa->x + (pb->x - pa->x) * alpha;
-  y = pa->y + (pb->y - pa->y) * alpha;
-  return true;
+    const float alpha = static_cast<float>(render_tick_ - a->tick) /
+                         static_cast<float>(b->tick - a->tick);
+    x = pa->x + (pb->x - pa->x) * alpha;
+    y = pa->y + (pb->y - pa->y) * alpha;
+    return true;
+  }
+
+  // Starved: no extrapolation, deliberately -- Decision 5 (freeze at the
+  // newest known position, never guess a velocity-projected one that must
+  // later be visibly retracted).
+  if (a != nullptr) {
+    const sim::PlayerState* pa = findById(*a, player_id);
+    if (pa == nullptr) return false;
+    x = pa->x;
+    y = pa->y;
+    return true;
+  }
+  if (b != nullptr) {
+    const sim::PlayerState* pb = findById(*b, player_id);
+    if (pb == nullptr) return false;
+    x = pb->x;
+    y = pb->y;
+    return true;
+  }
+  return false;
 }
 
 }  // namespace client
