@@ -38,3 +38,20 @@ TEST(SnapshotRingTest, StoresAndFindsByTick) {
   EXPECT_EQ(ring.newest()->tick, 103u);
   EXPECT_EQ(ring.count(), 2u);
 }
+
+TEST(SnapshotRingTest, EvictsOldestOnceFull) {
+  net::SnapshotRing ring;
+  for (uint32_t tick = 1; tick <= 17; ++tick) {
+    sim::WorldSnapshot s{};
+    s.tick = tick;
+    s.count = 0;
+    ring.store(s);
+  }
+
+  EXPECT_EQ(ring.count(), net::kSnapshotRingSlots);
+  EXPECT_EQ(ring.find(1), nullptr);
+  EXPECT_NE(ring.find(2), nullptr);
+  EXPECT_NE(ring.find(17), nullptr);
+  ASSERT_NE(ring.newest(), nullptr);
+  EXPECT_EQ(ring.newest()->tick, 17u);
+}
