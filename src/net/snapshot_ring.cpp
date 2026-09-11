@@ -24,6 +24,24 @@ const sim::WorldSnapshot* SnapshotRing::newest() const noexcept {
   return best;
 }
 
+const sim::WorldSnapshot* SnapshotRing::newestAtOrBefore(uint32_t tick) const noexcept {
+  const sim::WorldSnapshot* best = nullptr;
+  for (size_t i = 0; i < kSnapshotRingSlots; ++i) {
+    if (!filled_[i] || slots_[i].tick > tick) continue;
+    if (best == nullptr || slots_[i].tick > best->tick) best = &slots_[i];
+  }
+  return best;
+}
+
+const sim::WorldSnapshot* SnapshotRing::oldestAfter(uint32_t tick) const noexcept {
+  const sim::WorldSnapshot* best = nullptr;
+  for (size_t i = 0; i < kSnapshotRingSlots; ++i) {
+    if (!filled_[i] || slots_[i].tick <= tick) continue;
+    if (best == nullptr || slots_[i].tick < best->tick) best = &slots_[i];
+  }
+  return best;
+}
+
 uint32_t SnapshotRing::count() const noexcept {
   uint32_t n = 0;
   for (size_t i = 0; i < kSnapshotRingSlots; ++i) {

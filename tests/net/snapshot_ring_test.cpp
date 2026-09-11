@@ -55,3 +55,31 @@ TEST(SnapshotRingTest, EvictsOldestOnceFull) {
   ASSERT_NE(ring.newest(), nullptr);
   EXPECT_EQ(ring.newest()->tick, 17u);
 }
+
+TEST(SnapshotRingTest, BracketsATickBetweenTwoSnapshots) {
+  net::SnapshotRing ring;
+  for (uint32_t tick : {100u, 103u, 106u}) {
+    sim::WorldSnapshot s{};
+    s.tick = tick;
+    s.count = 0;
+    ring.store(s);
+  }
+
+  ASSERT_NE(ring.newestAtOrBefore(104), nullptr);
+  EXPECT_EQ(ring.newestAtOrBefore(104)->tick, 103u);
+  ASSERT_NE(ring.oldestAfter(104), nullptr);
+  EXPECT_EQ(ring.oldestAfter(104)->tick, 106u);
+
+  ASSERT_NE(ring.newestAtOrBefore(103), nullptr);
+  EXPECT_EQ(ring.newestAtOrBefore(103)->tick, 103u);
+  ASSERT_NE(ring.oldestAfter(103), nullptr);
+  EXPECT_EQ(ring.oldestAfter(103)->tick, 106u);
+
+  EXPECT_EQ(ring.newestAtOrBefore(99), nullptr);
+  ASSERT_NE(ring.oldestAfter(99), nullptr);
+  EXPECT_EQ(ring.oldestAfter(99)->tick, 100u);
+
+  ASSERT_NE(ring.newestAtOrBefore(200), nullptr);
+  EXPECT_EQ(ring.newestAtOrBefore(200)->tick, 106u);
+  EXPECT_EQ(ring.oldestAfter(200), nullptr);
+}

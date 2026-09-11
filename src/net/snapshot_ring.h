@@ -18,6 +18,8 @@ class SnapshotRing {
   void store(const sim::WorldSnapshot& s) noexcept;
   const sim::WorldSnapshot* find(uint32_t tick) const noexcept;          // nullptr when absent
   const sim::WorldSnapshot* newest() const noexcept;                     // nullptr when empty
+  const sim::WorldSnapshot* newestAtOrBefore(uint32_t tick) const noexcept;
+  const sim::WorldSnapshot* oldestAfter(uint32_t tick) const noexcept;
   uint32_t count() const noexcept;  // live entries, saturating at kSnapshotRingSlots
 
  private:
