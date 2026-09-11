@@ -83,6 +83,11 @@ int main(int argc, char** argv) {
   }
 
   std::printf("ticks=%u\n", ticks_run);
+  std::printf("snapshot_bytes=%llu full_equiv_bytes=%llu deltas=%llu keyframes=%llu\n",
+              static_cast<unsigned long long>(srv->snapshotBytesSent()),
+              static_cast<unsigned long long>(srv->snapshotBytesFullEquivalent()),
+              static_cast<unsigned long long>(srv->deltasSent()),
+              static_cast<unsigned long long>(srv->keyframesSent()));
   std::fflush(stdout);
   return 0;
 }
