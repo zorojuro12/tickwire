@@ -7,6 +7,8 @@
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "net/transport.h"
 #include "server/input_buffer.h"
 #include "server/packet_ring.h"
@@ -244,21 +246,44 @@ class Server {
     sendFramed(to, out_h, {});
   }
 
+  // Encodes and sends the newest snapshot once per session, because each
+  // session may hold a different acknowledged baseline. A session whose
+  // acknowledged tick still has a matching entry in `history_` gets a delta
+  // against it; every other session (never acknowledged, or its baseline
+  // has aged out of the ring) gets the full snapshot. Deliberately no
+  // group-by-baseline cache: 32 sessions x 20 Hz is 640 encodes/second of a
+  // sub-microsecond function, not worth optimizing ahead of P5's own
+  // measurements.
   void broadcastSnapshot(uint32_t now_ms) noexcept {
     world_.writeSnapshot(snapshot_);
-    net::ByteWriter pw(snapshot_payload_);
-    if (!net::encodeSnapshot(snapshot_, pw)) {
-      ++dropped_;
-      return;
-    }
-    const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
+    history_.store(snapshot_);
 
     for (size_t i = 0; i < sessions_.count(); ++i) {
+      const uint32_t pid = sessions_.playerAt(i);
+      const sim::WorldSnapshot* baseline = history_.find(sessions_.ackedSnapshotTick(pid));
+
+      net::ByteWriter pw(snapshot_payload_);
+      net::MsgType type = net::MsgType::kSnapshotDelta;
+      bool ok = false;
+      if (baseline != nullptr && baseline->tick != snapshot_.tick) {
+        ok = net::encodeSnapshotDelta(*baseline, snapshot_, pw);
+      }
+      if (!ok) {
+        pw = net::ByteWriter(snapshot_payload_);
+        type = net::MsgType::kSnapshot;
+        ok = net::encodeSnapshot(snapshot_, pw);
+      }
+      if (!ok) {
+        ++dropped_;
+        continue;
+      }
+
       net::PacketHeader out_h;
-      out_h.type = net::MsgType::kSnapshot;
+      out_h.type = type;
       out_h.tick = world_.tick();
       out_h.send_time_ms = now_ms;
-      out_h.ack_tick = sessions_.lastInputTick(sessions_.playerAt(i));
+      out_h.ack_tick = sessions_.lastInputTick(pid);
+      const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
       sendFramed(sessions_.endpointAt(i), out_h, payload);
     }
   }
@@ -285,6 +310,7 @@ class Server {
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};
   std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
+  net::SnapshotRing history_;
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;

@@ -783,5 +783,87 @@ TEST(ServerTest, InputAcknowledgmentUpdatesTheSessionsBaseline) {
   EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_id), 42u);
 }
 
+TEST(ServerTest, SendsADeltaToASessionHoldingAKnownBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2070u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  for (uint32_t i = 0; i < 2 * kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  uint16_t full_payload_len = 0;
+  bool found_first_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) {
+      t0 = h.tick;
+      full_payload_len = h.payload_len;
+      found_first_snapshot = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_first_snapshot);
+
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, /*ack_tick=*/t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  bool found_delta = false;
+  net::PacketHeader delta_h;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    delta_h = h;
+    found_delta = true;
+  }
+  ASSERT_TRUE(found_delta);
+  EXPECT_EQ(delta_h.type, net::MsgType::kSnapshotDelta);
+  EXPECT_LT(delta_h.payload_len, full_payload_len);
+
+  // Regression pin: a second client that joins and acknowledges nothing
+  // still receives a full kSnapshot.
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2071u};
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  bool found_b_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpB) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) found_b_snapshot = true;
+  }
+  EXPECT_TRUE(found_b_snapshot);
+}
+
 }  // namespace
 }  // namespace server
