@@ -205,5 +205,21 @@ TEST(SessionTableTest, RecordsAndReportsAnAcknowledgedSnapshotTick) {
   EXPECT_EQ(table.ackedSnapshotTick(pid), 120u);
 }
 
+TEST(SessionTableTest, IgnoresAnAcknowledgmentOlderThanTheStoredOne) {
+  SessionTable table;
+  const uint32_t pid = table.joinOrGet(ep(0), 0);
+  (void)pid;
+
+  table.noteSnapshotAck(ep(0), 120);
+  table.noteSnapshotAck(ep(0), 90);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 120u);
+
+  table.noteSnapshotAck(ep(0), 121);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 121u);
+
+  table.noteSnapshotAck(ep(0), 0);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 121u);
+}
+
 }  // namespace
 }  // namespace server

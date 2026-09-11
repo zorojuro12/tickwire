@@ -77,7 +77,8 @@ uint32_t SessionTable::lastInputTick(uint32_t player_id) const noexcept {
 void SessionTable::noteSnapshotAck(const net::Endpoint& from, uint32_t snapshot_tick) noexcept {
   int slot = findByEndpoint(from);
   if (slot < 0) return;
-  entries_[static_cast<uint32_t>(slot)].acked_snapshot_tick = snapshot_tick;
+  Entry& e = entries_[static_cast<uint32_t>(slot)];
+  if (snapshot_tick > e.acked_snapshot_tick) e.acked_snapshot_tick = snapshot_tick;
 }
 
 uint32_t SessionTable::ackedSnapshotTick(uint32_t player_id) const noexcept {
