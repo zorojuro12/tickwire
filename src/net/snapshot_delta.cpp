@@ -66,6 +66,8 @@ bool decodeSnapshotDelta(ByteReader& r, SnapshotDelta& out) {
   d.changed_mask = r.u32();
   d.record_count = static_cast<uint32_t>(__builtin_popcount(d.changed_mask));
 
+  if (d.changed_mask & ~d.present_mask) return false;
+
   uint32_t idx = 0;
   for (uint32_t id = 1; id <= sim::kMaxPlayers; ++id) {
     if ((d.changed_mask & (1u << (id - 1))) == 0) continue;

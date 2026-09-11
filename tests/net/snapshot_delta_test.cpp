@@ -178,5 +178,28 @@ TEST(SnapshotDeltaTest, DeltaThenApplyEqualsTheFullSnapshot) {
   EXPECT_EQ(fw.size(), kSnapshotFixedBytes + sim::kMaxPlayers * kPlayerStateBytes);
 }
 
+TEST(SnapshotDeltaTest, RejectsChangedMaskNotSubsetOfPresentMask) {
+  std::array<std::byte, kMaxPacket> buf{};
+  ByteWriter w(buf);
+  w.u32(103);              // tick
+  w.u32(100);              // baseline_tick
+  w.u32(0b0001);           // present_mask
+  w.u32(0b0011);           // changed_mask -- bit 1 set but not present
+  for (int rec = 0; rec < 2; ++rec) {
+    w.f32(1.0f);
+    w.f32(2.0f);
+    w.f32(0.0f);
+    w.f32(0.0f);
+    w.f32(sim::kPlayerRadius);
+  }
+  ASSERT_TRUE(w.ok());
+
+  ByteReader r(std::span<const std::byte>(buf).subspan(0, w.size()));
+  SnapshotDelta d{};
+  d.tick = 0xDEADBEEF;
+  EXPECT_FALSE(decodeSnapshotDelta(r, d));
+  EXPECT_EQ(d.tick, 0xDEADBEEFu);
+}
+
 }  // namespace
 }  // namespace net
