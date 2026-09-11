@@ -1007,5 +1007,58 @@ TEST(ServerTest, FallsBackToAKeyframeWhenTheBaselineHasAgedOut) {
   EXPECT_EQ(last_h.type, net::MsgType::kSnapshot);
 }
 
+TEST(ServerTest, ReportsSnapshotByteSavings) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x20A0u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  uint32_t acked = 0;
+  size_t snapshot_type_packets = 0;
+  for (int broadcast = 0; broadcast < 8; ++broadcast) {
+    if (acked != 0) {
+      injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, acked);
+      srv->ingest();
+    }
+    for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+      srv->tick(now_ms);
+      now_ms += 16;
+    }
+    for (size_t i = 0; i < tp->sentCount(); ++i) {
+      const RecordingTransport::Sent& s = tp->sentAt(i);
+      if (s.to != kEpA) continue;
+      net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+      net::PacketHeader h;
+      ASSERT_TRUE(net::decodeHeader(r, h));
+      if (h.type == net::MsgType::kSnapshot || h.type == net::MsgType::kSnapshotDelta) {
+        acked = h.tick;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot || h.type == net::MsgType::kSnapshotDelta) {
+      ++snapshot_type_packets;
+    }
+  }
+
+  EXPECT_GE(srv->keyframesSent(), 1u);
+  EXPECT_GE(srv->deltasSent(), 1u);
+  EXPECT_GT(srv->snapshotBytesSent(), 0u);
+  EXPECT_GT(srv->snapshotBytesFullEquivalent(), srv->snapshotBytesSent());
+  EXPECT_EQ(srv->keyframesSent() + srv->deltasSent(), snapshot_type_packets);
+}
+
 }  // namespace
 }  // namespace server

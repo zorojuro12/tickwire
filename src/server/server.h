@@ -122,6 +122,12 @@ class Server {
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
   uint64_t inputUnderruns() const noexcept { return input_underruns_; }
   uint64_t lateInputs() const noexcept { return late_inputs_; }
+  uint64_t deltasSent() const noexcept { return deltas_sent_; }
+  uint64_t keyframesSent() const noexcept { return keyframes_sent_; }
+  uint64_t snapshotBytesSent() const noexcept { return snapshot_bytes_sent_; }
+  uint64_t snapshotBytesFullEquivalent() const noexcept {
+    return snapshot_bytes_full_equivalent_;
+  }
 
  private:
   static void spawnPosition(uint32_t player_id, float& x, float& y) noexcept {
@@ -278,6 +284,15 @@ class Server {
         continue;
       }
 
+      if (type == net::MsgType::kSnapshotDelta) {
+        ++deltas_sent_;
+      } else {
+        ++keyframes_sent_;
+      }
+      snapshot_bytes_sent_ += pw.size();
+      snapshot_bytes_full_equivalent_ +=
+          net::kSnapshotFixedBytes + snapshot_.count * net::kPlayerStateBytes;
+
       net::PacketHeader out_h;
       out_h.type = type;
       out_h.tick = world_.tick();
@@ -316,6 +331,10 @@ class Server {
   uint64_t ingest_overflows_ = 0;
   uint64_t input_underruns_ = 0;
   uint64_t late_inputs_ = 0;
+  uint64_t deltas_sent_ = 0;
+  uint64_t keyframes_sent_ = 0;
+  uint64_t snapshot_bytes_sent_ = 0;
+  uint64_t snapshot_bytes_full_equivalent_ = 0;
 };
 
 }  // namespace server
