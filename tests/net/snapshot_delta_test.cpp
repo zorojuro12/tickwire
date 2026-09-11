@@ -54,5 +54,41 @@ TEST(SnapshotDeltaTest, UnchangedPlayerIsOmittedAndRestored) {
   }
 }
 
+TEST(SnapshotDeltaTest, DepartedPlayerIsDroppedFromPresentMask) {
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 100;
+  baseline.count = 3;
+  baseline.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+  baseline.players[1] = sim::PlayerState{2, 1.0f, 1.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+  baseline.players[2] = sim::PlayerState{3, 2.0f, 2.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+
+  sim::WorldSnapshot current{};
+  current.tick = 103;
+  current.count = 2;
+  current.players[0] = sim::PlayerState{1, 0.0f, 0.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+  current.players[1] = sim::PlayerState{3, 2.0f, 2.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+
+  std::array<std::byte, kMaxPacket> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeSnapshotDelta(baseline, current, w));
+  EXPECT_EQ(w.size(), kSnapshotDeltaFixedBytes);
+
+  ByteReader r(std::span<const std::byte>(buf).subspan(0, w.size()));
+  SnapshotDelta d{};
+  ASSERT_TRUE(decodeSnapshotDelta(r, d));
+  EXPECT_EQ(d.present_mask, 0b101u);
+  EXPECT_EQ(d.changed_mask, 0u);
+  EXPECT_EQ(d.record_count, 0u);
+
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(applySnapshotDelta(baseline, d, out));
+  EXPECT_EQ(out.count, 2u);
+  EXPECT_EQ(out.players[0].id, 1u);
+  EXPECT_EQ(out.players[1].id, 3u);
+  for (uint32_t i = 0; i < out.count; ++i) {
+    EXPECT_NE(out.players[i].id, 2u);
+  }
+}
+
 }  // namespace
 }  // namespace net
