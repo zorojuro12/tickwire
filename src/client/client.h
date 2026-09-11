@@ -124,6 +124,12 @@ class Client {
   uint32_t deltasDropped() const noexcept { return deltas_dropped_; }
   uint32_t renderTick() const noexcept { return interp_.renderTick(); }
 
+  // A pure toggle, like P3's prediction toggle: interp_ keeps advancing and
+  // observing while it is off, so re-enabling resumes immediately rather
+  // than re-seeding.
+  void setInterpolationEnabled(bool on) noexcept { interpolation_enabled_ = on; }
+  bool interpolationEnabled() const noexcept { return interpolation_enabled_; }
+
   // A pure toggle: the prediction world is seeded once (on the first
   // snapshot that carries this player, in handleSnapshot below) and simply
   // stops or resumes receiving new inputs as this flips. It is not reset,
