@@ -955,5 +955,57 @@ TEST(ServerTest, ASentDeltaReconstructsTheAuthoritativeSnapshot) {
   }
 }
 
+TEST(ServerTest, FallsBackToAKeyframeWhenTheBaselineHasAgedOut) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2090u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) t0 = h.tick;
+  }
+  ASSERT_NE(t0, 0u);
+
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < 60; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  net::PacketHeader last_h;
+  bool found = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    last_h = h;
+    found = true;
+  }
+  ASSERT_TRUE(found);
+  EXPECT_EQ(last_h.type, net::MsgType::kSnapshot);
+}
+
 }  // namespace
 }  // namespace server
