@@ -713,5 +713,34 @@ TEST(ClientTest, ClientAndServerConvergeThroughSimulatedLatency) {
   EXPECT_GT(delayed_iterations_to_join, baselineIterationsToJoin);
 }
 
+TEST(ClientTest, InputAcknowledgesTheNewestSnapshotHeld) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  ASSERT_TRUE(c.sendInput(16, 0.0f, 0.0f, 0.0f, 0.0f, false));
+  {
+    const RecordingTransport::Sent& s = tp->sentAt(tp->sentCount() - 1);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.ack_tick, 0u);
+  }
+
+  injectSnapshot(*tp, 77, 5000, onePlayerSnapshot(77, 0.0f, 0.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+
+  ASSERT_TRUE(c.sendInput(48, 0.0f, 0.0f, 0.0f, 0.0f, false));
+  {
+    const RecordingTransport::Sent& s = tp->sentAt(tp->sentCount() - 1);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.ack_tick, 77u);
+  }
+}
+
 }  // namespace
 }  // namespace client

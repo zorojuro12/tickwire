@@ -79,6 +79,12 @@ class Client {
     h.type = net::MsgType::kInput;
     h.tick = tick_;
     h.send_time_ms = now_ms;
+    // Names the newest snapshot this client holds, which is what makes the
+    // server's delta baseline self-healing under packet loss:
+    // latest_snapshot_tick_ is only ever assigned from a snapshot this
+    // client has accepted and stored, so it can never name a baseline this
+    // client does not hold.
+    h.ack_tick = latest_snapshot_tick_;
     if (!sendFramed(h, payload)) return false;
 
     pending_.record(in, now_ms);
