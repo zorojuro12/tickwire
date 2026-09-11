@@ -197,9 +197,15 @@ class Server {
     // independent of whether the InputBuffer's acceptance window then
     // takes it. The snapshot acknowledgment is likewise recorded only after
     // authorize() succeeds -- an unauthorized sender must not be able to
-    // move another session's delta baseline.
+    // move another session's delta baseline. ack_tick is otherwise
+    // unvalidated attacker-controlled data; a legitimate client can only
+    // have received a snapshot the server already sent, which is always
+    // <= world_.tick(), so a larger value is rejected outright rather than
+    // recorded -- without this, a single bogus ack_tick permanently pins
+    // the session to full keyframes (every genuine, smaller ack_tick is
+    // then monotonically rejected as "older" by noteSnapshotAck).
     sessions_.touch(from, world_.tick(), 0);
-    sessions_.noteSnapshotAck(from, h.ack_tick);
+    if (h.ack_tick <= world_.tick()) sessions_.noteSnapshotAck(from, h.ack_tick);
     if (inputs_[in.player_id - 1].push(in)) {
       sessions_.touch(from, world_.tick(), in.tick);
     } else {

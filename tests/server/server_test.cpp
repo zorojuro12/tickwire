@@ -777,11 +777,16 @@ TEST(ServerTest, InputAcknowledgmentUpdatesTheSessionsBaseline) {
   const uint32_t player_id = srv->playerFor(kEpA);
   ASSERT_NE(player_id, 0u);
 
-  injectInputWithAck(*tp, kEpA, player_id, /*input_tick=*/1, /*ack_tick=*/42);
+  // ack_tick must be a tick the server could plausibly have already sent
+  // (<= world_.tick() at the time it's processed) -- world_.tick() is 2
+  // once this input is processed, so 1 is achievable; a larger value
+  // would now be rejected by the future-ack guard (see the dedicated
+  // IgnoresAnAckTickFromTheFuture test).
+  injectInputWithAck(*tp, kEpA, player_id, /*input_tick=*/1, /*ack_tick=*/1);
   srv->ingest();
   srv->tick(16);
 
-  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_id), 42u);
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_id), 1u);
 }
 
 TEST(ServerTest, SendsADeltaToASessionHoldingAKnownBaseline) {
@@ -1058,6 +1063,35 @@ TEST(ServerTest, ReportsSnapshotByteSavings) {
   EXPECT_GT(srv->snapshotBytesSent(), 0u);
   EXPECT_GT(srv->snapshotBytesFullEquivalent(), srv->snapshotBytesSent());
   EXPECT_EQ(srv->keyframesSent() + srv->deltasSent(), snapshot_type_packets);
+}
+
+TEST(ServerTest, IgnoresAnAckTickFromTheFuture) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x20B0u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  // world_.tick() is 1 at this point; an ack_tick far beyond anything the
+  // server could actually have sent must not stick -- a buggy or hostile
+  // client sending this once would otherwise pin its own session to full
+  // keyframes for the rest of the session (every real, smaller ack_tick
+  // is monotonically rejected as "older").
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, /*ack_tick=*/0xFFFFFFF0u);
+  srv->ingest();
+  srv->tick(16);
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_a), 0u);
+
+  // A legitimate ack_tick at or before the server's own current tick is
+  // still accepted normally.
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/2, /*ack_tick=*/2);
+  srv->ingest();
+  srv->tick(32);
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_a), 2u);
 }
 
 }  // namespace
