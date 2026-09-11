@@ -1,5 +1,7 @@
 #include "net/snapshot_delta.h"
 
+#include <cmath>
+
 namespace net {
 namespace {
 
@@ -82,6 +84,14 @@ bool decodeSnapshotDelta(ByteReader& r, SnapshotDelta& out) {
 
   if (!r.ok()) return false;
   if (r.remaining() != 0) return false;
+
+  for (uint32_t i = 0; i < d.record_count; ++i) {
+    const sim::PlayerState& p = d.records[i];
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.vx) ||
+        !std::isfinite(p.vy) || !std::isfinite(p.radius)) {
+      return false;
+    }
+  }
 
   out = d;
   return true;

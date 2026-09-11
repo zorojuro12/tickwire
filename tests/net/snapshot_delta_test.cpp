@@ -1,6 +1,8 @@
 #include "net/snapshot_delta.h"
 
 #include <array>
+#include <cmath>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -232,6 +234,33 @@ TEST(SnapshotDeltaTest, RejectsPayloadLengthDisagreeingWithChangedMask) {
     ByteReader r(std::span<const std::byte>(buf).subspan(0, size));
     SnapshotDelta d{};
     EXPECT_FALSE(decodeSnapshotDelta(r, d));
+  }
+}
+
+TEST(SnapshotDeltaTest, RejectsNonFiniteRecordFields) {
+  auto buildWithField = [](int field_index, float value) {
+    std::array<std::byte, kMaxPacket> buf{};
+    ByteWriter w(buf);
+    w.u32(103);
+    w.u32(100);
+    w.u32(0b1);
+    w.u32(0b1);
+    float fields[5] = {1.0f, 2.0f, 0.0f, 0.0f, sim::kPlayerRadius};
+    fields[field_index] = value;
+    for (float f : fields) w.f32(f);
+    return std::pair{buf, w.size()};
+  };
+
+  const float bad_values[] = {std::nanf(""), std::numeric_limits<float>::infinity(),
+                               -std::numeric_limits<float>::infinity()};
+
+  for (int field = 0; field < 5; ++field) {
+    for (float bad : bad_values) {
+      auto [buf, size] = buildWithField(field, bad);
+      ByteReader r(std::span<const std::byte>(buf).subspan(0, size));
+      SnapshotDelta d{};
+      EXPECT_FALSE(decodeSnapshotDelta(r, d)) << "field " << field << " value " << bad;
+    }
   }
 }
 
