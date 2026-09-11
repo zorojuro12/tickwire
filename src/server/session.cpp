@@ -31,6 +31,11 @@ uint32_t SessionTable::joinOrGet(const net::Endpoint& from, uint32_t now_tick) {
     }
   }
 
+  // entries_[count_] is already a zeroed Entry{} here -- removeAt() always
+  // resets exactly the tail slot it vacates, so every field NOT explicitly
+  // assigned below (acked_snapshot_tick, ever_fired) still starts fresh.
+  // A field added to Entry later relies on this same implicit reset unless
+  // it's given its own explicit assignment here.
   Entry& e = entries_[count_];
   e.peer = from;
   e.player_id = new_id;
