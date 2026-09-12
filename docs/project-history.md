@@ -950,4 +950,72 @@ snapshot rate (orange circle) instead. Matches the design's claim exactly —
 confirmed by direct comparison of the same player under both states, not
 just "it looked fine." Closes Task 9 Checkpoint 3's outstanding item.
 
-<!-- Next section: ## P5 — Threading, queue benchmark -->
+---
+
+## P5 — Threading, queue benchmark
+
+**Finding — the phase-by-phase skill import map was built from a name
+inventory, and three of its four remaining rows were wrong.** `docs/dev-workflow-guide.md`
+§3a was cross-referenced against `~/projects/ecc-survey.md`'s three-bucket
+inventory, which lists skill *names* and bucket numbers; no `SKILL.md` was ever
+opened while writing the table. P5's row was the map's own self-described
+"clearest concrete gap in the whole map," naming three skills to import at the
+start of this phase. Reading them at the trigger point:
+
+- **`benchmark-methodology` is competitive *marketing* analysis, not
+  performance work.** Its description: *"Use after
+  `competitive-platform-analysis` has produced a tiered competitor set. Scores
+  each competitor across nine weighted dimensions (positioning, voice, visual
+  craft, offer packaging, evidence, enterprise-readiness, ...)"* — it sits
+  between two other marketing skills in a content pipeline. It matched P5 on
+  the word "benchmark" and nothing else.
+- **`benchmark` is web/cloud-only.** All four modes: Core Web Vitals via
+  browser MCP, HTTP endpoint p50/p95/p99, JS/TS/Docker build times, and a
+  before/after page-weight table. Nothing addresses an in-process 60 Hz tick
+  loop or a queue handoff.
+- **`benchmark-optimization-loop` is the real fit, and was imported** — the one
+  of the three that is stack-agnostic. Its required-baseline checklist
+  (operation, correctness gate, metric, current baseline, **search budget**),
+  variant table, and promotion gate ("the delta is repeated or explained";
+  "best measured safe variant," never "global optimum") map onto P5 directly:
+  operation = the queue handoff, correctness gate = the existing three
+  sanitizer configs, metric = handoff latency plus tick-jitter percentiles,
+  variants = `PacketRing`'s mutex path vs the lock-free `SpscRing`.
+- **`latency-critical-systems` was not in the table at all and was evaluated
+  anyway**, since its description (p95 latency, hot paths, queues) reads like a
+  direct hit. Rejected: its hot-path model is `provider API → ingest worker →
+  queue → cache → edge route → browser render` and its optimization order is
+  about round trips and cache freshness. Only its "Split The Metrics" list
+  transfers, and the design doc already fixes Tickwire's four metrics.
+
+Two further rows were closed rather than imported. The **`security-scan` skill**
+row asserted a distinction that does not exist — it claimed the skill audits
+`.claude/` config while the already-installed `/security-scan` command audits
+code; the command's own frontmatter reads *"Run AgentShield against agent, hook,
+MCP, permission, and secret surfaces"* and shells out to the same
+`npx ecc-agentshield scan` engine, so importing the skill is pure redundancy.
+The **`documentation-lookup`/`docs-lookup`** row's trigger genuinely fired at P2
+(raylib) and was missed then, but both are inert: no Context7 MCP server is
+configured (global and project `mcpServers` are both empty) and that MCP is the
+skill's entire mechanism, raylib integration is complete, and no P5–P7 phase
+adds an external library. `docker-patterns` is the one row correctly still
+pending — its trigger is a *shipped* container, and the `Dockerfile` remains a
+dev-toolchain image.
+
+**The hazard, stated for transfer:** *an import map built from a name inventory
+recommends tools that don't do what their names imply, and the cost is paid at
+the phase that depends on them — the one point where there's no slack to
+re-plan.* This is the same class as the false-green rule P4 recorded: a step
+that reports success without having done the thing it claims. A survey tells
+you what **exists**; it never tells you whether it **applies**. Carrying an
+import map into another project means re-reading each candidate's actual
+description at import time, not trusting the row.
+
+Also corrected while in the file: §2's status block still read *"`/impl-plan`
+has NOT been run for Tickwire"* — written before P0 and stale since, given
+`docs/specs/2026-09-04-architecture-resolution.md` exists and `CLAUDE.md` names
+it authoritative for every architectural decision. Left uncorrected it would
+tell a cold planning session to run the architectural layer again at P5, which
+is exactly what §2 itself warns against.
+
+<!-- Next entries: P5 execution — threading, SpscRing, benchmark numbers -->
