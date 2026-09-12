@@ -101,6 +101,9 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     if (IsKeyPressed(KEY_P)) {
       client->setPredictionEnabled(!client->predictionEnabled());
     }
+    if (IsKeyPressed(KEY_I)) {
+      client->setInterpolationEnabled(!client->interpolationEnabled());
+    }
 
     const sim::WorldSnapshot& snap = client->latestSnapshot();
     float local_x = 0.0f, local_y = 0.0f;
@@ -121,16 +124,22 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     ClearBackground(BLACK);
     DrawRectangleLines(0, 0, static_cast<int>(kSide), static_cast<int>(kSide), RAYWHITE);
 
-    // Remote players come straight from the snapshot -- prediction is
-    // local-player-only. The local player is drawn separately, from
-    // localPosition(), which is predicted when prediction is on and the
-    // raw snapshot position when it's off.
+    // Remote players are read through remotePosition() -- interpolated
+    // between snapshots when interpolation is on, the raw newest snapshot
+    // when it's off -- never predicted; that stays local-player-only. The
+    // local player is drawn separately, from localPosition(). This guard
+    // is now redundant (remotePosition() itself refuses the local id) but
+    // stays: it documents the split at the call site.
     for (uint32_t i = 0; i < snap.count; ++i) {
       if (snap.players[i].id == client->playerId()) continue;
-      const client::ScreenPos sp =
-          client::worldToScreen(snap.players[i].x, snap.players[i].y, kSide, 0.0f, 0.0f);
+      float rx = 0.0f, ry = 0.0f;
+      if (!client->remotePosition(snap.players[i].id, rx, ry)) continue;
+      const client::ScreenPos sp = client::worldToScreen(rx, ry, kSide, 0.0f, 0.0f);
       const float r = client::worldToScreenRadius(snap.players[i].radius, kSide);
-      DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, RED);
+      // Red while interpolating, orange while not -- the same device the
+      // green/yellow local player already uses for the prediction toggle.
+      const Color color = client->interpolationEnabled() ? RED : ORANGE;
+      DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, color);
     }
 
     if (have_local) {
@@ -142,10 +151,12 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
       DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, color);
     }
 
-    DrawText(TextFormat("tick=%u latency=%ums players=%u pred=%s rtt=%ums lead=%d err_p99=%.2f",
+    DrawText(TextFormat("tick=%u latency=%ums players=%u pred=%s rtt=%ums lead=%d err_p99=%.2f "
+                          "interp=%s render=%u",
                           client->latestSnapshotTick(), latency_ms, snap.count,
                           client->predictionEnabled() ? "on" : "off", client->rttMs(),
-                          client->clockLead(), client->predictionError().p99()),
+                          client->clockLead(), client->predictionError().p99(),
+                          client->interpolationEnabled() ? "on" : "off", client->renderTick()),
               10, 10, 20, RAYWHITE);
     EndDrawing();
   }

@@ -10,6 +10,7 @@
 #include "net/framing.h"
 #include "net/loopback.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
 #include "net/transport.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -738,6 +739,359 @@ TEST(ServerTest, SilentSessionsTimeOutAndTheFreedIdIsReusable) {
   srv->ingest();
   srv->tick(now_ms + 32);
   EXPECT_EQ(srv->playerFor(kEpC), id_a);
+}
+
+// Frames and injects one kInput packet from `from`, claiming `player_id`,
+// with the header's ack_tick field set explicitly (injectInput always sends
+// a default header, ack_tick == 0).
+void injectInputWithAck(RecordingTransport& tp, const net::Endpoint& from, uint32_t player_id,
+                         uint32_t input_tick, uint32_t ack_tick) {
+  const sim::InputCommand in{.player_id = player_id,
+                              .tick = input_tick,
+                              .move_x = 0.0f,
+                              .move_y = 0.0f,
+                              .aim_x = 0.0f,
+                              .aim_y = 0.0f,
+                              .fire = false};
+  std::array<std::byte, net::kInputBytes> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeInput(in, pw));
+
+  net::PacketHeader h;
+  h.type = net::MsgType::kInput;
+  h.ack_tick = ack_tick;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ServerTest, InputAcknowledgmentUpdatesTheSessionsBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2060u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_id = srv->playerFor(kEpA);
+  ASSERT_NE(player_id, 0u);
+
+  // ack_tick must be a tick the server could plausibly have already sent
+  // (<= world_.tick() at the time it's processed) -- world_.tick() is 2
+  // once this input is processed, so 1 is achievable; a larger value
+  // would now be rejected by the future-ack guard (see the dedicated
+  // IgnoresAnAckTickFromTheFuture test).
+  injectInputWithAck(*tp, kEpA, player_id, /*input_tick=*/1, /*ack_tick=*/1);
+  srv->ingest();
+  srv->tick(16);
+
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_id), 1u);
+}
+
+TEST(ServerTest, SendsADeltaToASessionHoldingAKnownBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2070u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  for (uint32_t i = 0; i < 2 * kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  uint16_t full_payload_len = 0;
+  bool found_first_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) {
+      t0 = h.tick;
+      full_payload_len = h.payload_len;
+      found_first_snapshot = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_first_snapshot);
+
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, /*ack_tick=*/t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  bool found_delta = false;
+  net::PacketHeader delta_h;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    delta_h = h;
+    found_delta = true;
+  }
+  ASSERT_TRUE(found_delta);
+  EXPECT_EQ(delta_h.type, net::MsgType::kSnapshotDelta);
+  EXPECT_LT(delta_h.payload_len, full_payload_len);
+
+  // Regression pin: a second client that joins and acknowledges nothing
+  // still receives a full kSnapshot.
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2071u};
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  bool found_b_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpB) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) found_b_snapshot = true;
+  }
+  EXPECT_TRUE(found_b_snapshot);
+}
+
+TEST(ServerTest, ASentDeltaReconstructsTheAuthoritativeSnapshot) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2080u};
+  constexpr net::Endpoint kEpB{0x7F000001u, 0x2081u};
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  uint32_t input_tick = 1;
+  for (uint32_t i = 0; i < 2 * kSnapshotIntervalTicks; ++i) {
+    injectInput(*tp, kEpA, player_a, 1.0f, 0.0f, 0.0f, 0.0f, false, input_tick++);
+    srv->ingest();
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  sim::WorldSnapshot baseline{};
+  bool found_first_snapshot = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) {
+      ASSERT_TRUE(net::decodeSnapshot(r, baseline));
+      t0 = h.tick;
+      found_first_snapshot = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_first_snapshot);
+
+  injectInputWithAck(*tp, kEpA, player_a, input_tick, t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    injectInput(*tp, kEpA, player_a, 1.0f, 0.0f, 0.0f, 0.0f, false, input_tick++);
+    srv->ingest();
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  net::PacketHeader delta_h;
+  net::SnapshotDelta d{};
+  bool found_delta = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshotDelta) {
+      ASSERT_TRUE(net::decodeSnapshotDelta(r, d));
+      delta_h = h;
+      found_delta = true;
+    }
+  }
+  ASSERT_TRUE(found_delta);
+
+  sim::WorldSnapshot out{};
+  ASSERT_TRUE(net::applySnapshotDelta(baseline, d, out));
+
+  sim::WorldSnapshot expected{};
+  srv->world().writeSnapshot(expected);
+  EXPECT_EQ(out.tick, delta_h.tick);
+  EXPECT_EQ(out.count, expected.count);
+  for (uint32_t i = 0; i < out.count; ++i) {
+    const sim::PlayerState* want = nullptr;
+    for (uint32_t j = 0; j < expected.count; ++j) {
+      if (expected.players[j].id == out.players[i].id) want = &expected.players[j];
+    }
+    ASSERT_NE(want, nullptr);
+    EXPECT_EQ(out.players[i].x, want->x);
+    EXPECT_EQ(out.players[i].y, want->y);
+    EXPECT_EQ(out.players[i].vx, want->vx);
+    EXPECT_EQ(out.players[i].vy, want->vy);
+    EXPECT_EQ(out.players[i].radius, want->radius);
+  }
+}
+
+TEST(ServerTest, FallsBackToAKeyframeWhenTheBaselineHasAgedOut) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x2090u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  uint32_t t0 = 0;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot) t0 = h.tick;
+  }
+  ASSERT_NE(t0, 0u);
+
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, t0);
+  srv->ingest();
+  tp->clearSent();
+  for (uint32_t i = 0; i < 60; ++i) {
+    srv->tick(now_ms);
+    now_ms += 16;
+  }
+
+  net::PacketHeader last_h;
+  bool found = false;
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    if (s.to != kEpA) continue;
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    last_h = h;
+    found = true;
+  }
+  ASSERT_TRUE(found);
+  EXPECT_EQ(last_h.type, net::MsgType::kSnapshot);
+}
+
+TEST(ServerTest, ReportsSnapshotByteSavings) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x20A0u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  tp->clearSent();
+  uint32_t now_ms = 16;
+  uint32_t acked = 0;
+  size_t snapshot_type_packets = 0;
+  for (int broadcast = 0; broadcast < 8; ++broadcast) {
+    if (acked != 0) {
+      injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, acked);
+      srv->ingest();
+    }
+    for (uint32_t i = 0; i < kSnapshotIntervalTicks; ++i) {
+      srv->tick(now_ms);
+      now_ms += 16;
+    }
+    for (size_t i = 0; i < tp->sentCount(); ++i) {
+      const RecordingTransport::Sent& s = tp->sentAt(i);
+      if (s.to != kEpA) continue;
+      net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+      net::PacketHeader h;
+      ASSERT_TRUE(net::decodeHeader(r, h));
+      if (h.type == net::MsgType::kSnapshot || h.type == net::MsgType::kSnapshotDelta) {
+        acked = h.tick;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < tp->sentCount(); ++i) {
+    const RecordingTransport::Sent& s = tp->sentAt(i);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    if (h.type == net::MsgType::kSnapshot || h.type == net::MsgType::kSnapshotDelta) {
+      ++snapshot_type_packets;
+    }
+  }
+
+  EXPECT_GE(srv->keyframesSent(), 1u);
+  EXPECT_GE(srv->deltasSent(), 1u);
+  EXPECT_GT(srv->snapshotBytesSent(), 0u);
+  EXPECT_GT(srv->snapshotBytesFullEquivalent(), srv->snapshotBytesSent());
+  EXPECT_EQ(srv->keyframesSent() + srv->deltasSent(), snapshot_type_packets);
+}
+
+TEST(ServerTest, IgnoresAnAckTickFromTheFuture) {
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  constexpr net::Endpoint kEpA{0x7F000001u, 0x20B0u};
+  injectJoin(*tp, kEpA, 1);
+  srv->ingest();
+  srv->tick(0);
+  const uint32_t player_a = srv->playerFor(kEpA);
+  ASSERT_NE(player_a, 0u);
+
+  // world_.tick() is 1 at this point; an ack_tick far beyond anything the
+  // server could actually have sent must not stick -- a buggy or hostile
+  // client sending this once would otherwise pin its own session to full
+  // keyframes for the rest of the session (every real, smaller ack_tick
+  // is monotonically rejected as "older").
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/1, /*ack_tick=*/0xFFFFFFF0u);
+  srv->ingest();
+  srv->tick(16);
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_a), 0u);
+
+  // A legitimate ack_tick at or before the server's own current tick is
+  // still accepted normally.
+  injectInputWithAck(*tp, kEpA, player_a, /*input_tick=*/2, /*ack_tick=*/2);
+  srv->ingest();
+  srv->tick(32);
+  EXPECT_EQ(srv->sessions().ackedSnapshotTick(player_a), 2u);
 }
 
 }  // namespace

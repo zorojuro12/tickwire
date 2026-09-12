@@ -7,6 +7,8 @@
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "net/transport.h"
 #include "server/input_buffer.h"
 #include "server/packet_ring.h"
@@ -110,6 +112,7 @@ class Server {
   size_t queuedPackets() const noexcept { return ring_.size(); }
   uint32_t worldTick() const noexcept { return world_.tick(); }
   const sim::World& world() const noexcept { return world_; }
+  const SessionTable& sessions() const noexcept { return sessions_; }
   uint32_t playerFor(const net::Endpoint& ep) const noexcept { return sessions_.playerFor(ep); }
   uint64_t hits(uint32_t player_id) const noexcept {
     if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
@@ -119,6 +122,12 @@ class Server {
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
   uint64_t inputUnderruns() const noexcept { return input_underruns_; }
   uint64_t lateInputs() const noexcept { return late_inputs_; }
+  uint64_t deltasSent() const noexcept { return deltas_sent_; }
+  uint64_t keyframesSent() const noexcept { return keyframes_sent_; }
+  uint64_t snapshotBytesSent() const noexcept { return snapshot_bytes_sent_; }
+  uint64_t snapshotBytesFullEquivalent() const noexcept {
+    return snapshot_bytes_full_equivalent_;
+  }
 
  private:
   static void spawnPosition(uint32_t player_id, float& x, float& y) noexcept {
@@ -140,7 +149,7 @@ class Server {
         handleJoin(slot.peer, h, now_ms);
         break;
       case net::MsgType::kInput:
-        handleInput(slot.peer, r);
+        handleInput(slot.peer, h, r);
         break;
       case net::MsgType::kLeave:
         handleLeave(slot.peer, h);
@@ -173,7 +182,8 @@ class Server {
   // Application happens in tick()'s pass 1, at the tick the input names --
   // never at arrival, which is what makes the client's replay reproduce the
   // server's steps exactly.
-  void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {
+  void handleInput(const net::Endpoint& from, const net::PacketHeader& h,
+                    net::ByteReader& r) noexcept {
     sim::InputCommand in{};
     if (!net::decodeInput(r, in)) {
       ++dropped_;
@@ -185,8 +195,17 @@ class Server {
     }
     // Liveness updates unconditionally on a decoded, authorized input --
     // independent of whether the InputBuffer's acceptance window then
-    // takes it.
+    // takes it. The snapshot acknowledgment is likewise recorded only after
+    // authorize() succeeds -- an unauthorized sender must not be able to
+    // move another session's delta baseline. ack_tick is otherwise
+    // unvalidated attacker-controlled data; a legitimate client can only
+    // have received a snapshot the server already sent, which is always
+    // <= world_.tick(), so a larger value is rejected outright rather than
+    // recorded -- without this, a single bogus ack_tick permanently pins
+    // the session to full keyframes (every genuine, smaller ack_tick is
+    // then monotonically rejected as "older" by noteSnapshotAck).
     sessions_.touch(from, world_.tick(), 0);
+    if (h.ack_tick <= world_.tick()) sessions_.noteSnapshotAck(from, h.ack_tick);
     if (inputs_[in.player_id - 1].push(in)) {
       sessions_.touch(from, world_.tick(), in.tick);
     } else {
@@ -239,21 +258,53 @@ class Server {
     sendFramed(to, out_h, {});
   }
 
+  // Encodes and sends the newest snapshot once per session, because each
+  // session may hold a different acknowledged baseline. A session whose
+  // acknowledged tick still has a matching entry in `history_` gets a delta
+  // against it; every other session (never acknowledged, or its baseline
+  // has aged out of the ring) gets the full snapshot. Deliberately no
+  // group-by-baseline cache: 32 sessions x 20 Hz is 640 encodes/second of a
+  // sub-microsecond function, not worth optimizing ahead of P5's own
+  // measurements.
   void broadcastSnapshot(uint32_t now_ms) noexcept {
     world_.writeSnapshot(snapshot_);
-    net::ByteWriter pw(snapshot_payload_);
-    if (!net::encodeSnapshot(snapshot_, pw)) {
-      ++dropped_;
-      return;
-    }
-    const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
+    history_.store(snapshot_);
 
     for (size_t i = 0; i < sessions_.count(); ++i) {
+      const uint32_t pid = sessions_.playerAt(i);
+      const sim::WorldSnapshot* baseline = history_.find(sessions_.ackedSnapshotTick(pid));
+
+      net::ByteWriter pw(snapshot_payload_);
+      net::MsgType type = net::MsgType::kSnapshotDelta;
+      bool ok = false;
+      if (baseline != nullptr && baseline->tick != snapshot_.tick) {
+        ok = net::encodeSnapshotDelta(*baseline, snapshot_, pw);
+      }
+      if (!ok) {
+        pw = net::ByteWriter(snapshot_payload_);
+        type = net::MsgType::kSnapshot;
+        ok = net::encodeSnapshot(snapshot_, pw);
+      }
+      if (!ok) {
+        ++dropped_;
+        continue;
+      }
+
+      if (type == net::MsgType::kSnapshotDelta) {
+        ++deltas_sent_;
+      } else {
+        ++keyframes_sent_;
+      }
+      snapshot_bytes_sent_ += pw.size();
+      snapshot_bytes_full_equivalent_ +=
+          net::kSnapshotFixedBytes + snapshot_.count * net::kPlayerStateBytes;
+
       net::PacketHeader out_h;
-      out_h.type = net::MsgType::kSnapshot;
+      out_h.type = type;
       out_h.tick = world_.tick();
       out_h.send_time_ms = now_ms;
-      out_h.ack_tick = sessions_.lastInputTick(sessions_.playerAt(i));
+      out_h.ack_tick = sessions_.lastInputTick(pid);
+      const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
       sendFramed(sessions_.endpointAt(i), out_h, payload);
     }
   }
@@ -280,11 +331,16 @@ class Server {
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};
   std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
+  net::SnapshotRing history_;
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;
   uint64_t input_underruns_ = 0;
   uint64_t late_inputs_ = 0;
+  uint64_t deltas_sent_ = 0;
+  uint64_t keyframes_sent_ = 0;
+  uint64_t snapshot_bytes_sent_ = 0;
+  uint64_t snapshot_bytes_full_equivalent_ = 0;
 };
 
 }  // namespace server

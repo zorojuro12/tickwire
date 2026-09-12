@@ -43,6 +43,15 @@ plan execution, not assumed.
   server-side one) reintroduces the exact divergence P3 exists to close — see
   `docs/project-history.md`'s P3 pivot entry for why apply-on-arrival was
   replaced with this in the first place.
+- **The local player is predicted, never interpolated; a remote player is
+  interpolated, never predicted.** `Client::remotePosition` refuses the local
+  player's own id outright (returns `false`), and `Client::localPosition`
+  never consults `client::Interpolator`. Predicting a remote player would
+  require predicting *its* inputs, which nothing can do; smoothing it between
+  snapshots (`client::Interpolator`, P4) is a different technique for a
+  different problem than P3's local-only prediction. Verified by
+  `ClientTest.RemotePlayerIsInterpolatedBetweenSnapshots`, which asserts
+  `remotePosition(playerId(), ...)` returns `false` for the client's own id.
 
 ## Build and test
 

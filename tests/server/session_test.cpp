@@ -190,5 +190,47 @@ TEST(SessionTableTest, FiringIsRateLimitedPerPlayer) {
   EXPECT_TRUE(table.tryFire(b, 0));
 }
 
+TEST(SessionTableTest, RecordsAndReportsAnAcknowledgedSnapshotTick) {
+  SessionTable table;
+  const uint32_t pid = table.joinOrGet(ep(0), 0);
+
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 0u);
+  EXPECT_EQ(table.ackedSnapshotTick(999), 0u);
+
+  table.noteSnapshotAck(ep(0), 120);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 120u);
+
+  net::Endpoint unbound = ep(5);
+  table.noteSnapshotAck(unbound, 500);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 120u);
+}
+
+TEST(SessionTableTest, IgnoresAnAcknowledgmentOlderThanTheStoredOne) {
+  SessionTable table;
+  const uint32_t pid = table.joinOrGet(ep(0), 0);
+  (void)pid;
+
+  table.noteSnapshotAck(ep(0), 120);
+  table.noteSnapshotAck(ep(0), 90);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 120u);
+
+  table.noteSnapshotAck(ep(0), 121);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 121u);
+
+  table.noteSnapshotAck(ep(0), 0);
+  EXPECT_EQ(table.ackedSnapshotTick(pid), 121u);
+}
+
+TEST(SessionTableTest, ClearsTheAcknowledgedTickWhenASessionIsRemoved) {
+  SessionTable table;
+  const uint32_t a = table.joinOrGet(ep(0), 0);
+  table.noteSnapshotAck(ep(0), 120);
+  ASSERT_TRUE(table.remove(ep(0)));
+
+  const uint32_t b = table.joinOrGet(ep(1), 0);
+  ASSERT_EQ(b, a);
+  EXPECT_EQ(table.ackedSnapshotTick(b), 0u);
+}
+
 }  // namespace
 }  // namespace server

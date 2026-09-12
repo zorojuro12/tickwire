@@ -40,13 +40,17 @@ and how.
 
 In the demo window: **WASD** moves, the **mouse** aims, **left click** fires,
 **`[`**/**`]`** adjust the client's simulated inbound latency by 25ms a step
-(0–500ms), and **`P`** toggles client-side prediction. Drag latency up to
-~200ms with prediction **off** — movement visibly lurches behind the keys.
-Toggle prediction **on** at the same latency — it should feel instantly
-responsive again. The local player's circle changes color (green while
-predicting, yellow while not) so the toggle's state is visible without
-reading the HUD, which also shows `rtt`/`lead`/`err_p99` for whichever mode
-is active. Closing the window leaves cleanly.
+(0–500ms), **`P`** toggles client-side prediction, and **`I`** toggles remote
+entity interpolation. Drag latency up to ~200ms with prediction **off** —
+movement visibly lurches behind the keys. Toggle prediction **on** at the
+same latency — it should feel instantly responsive again. The local player's
+circle changes color (green while predicting, yellow while not) so the
+toggle's state is visible without reading the HUD, which also shows
+`rtt`/`lead`/`err_p99` for whichever mode is active. Remote players (other
+clients) similarly change color with interpolation (red while interpolating,
+orange while not) — with two clients open, one moving, watch the other's
+circle glide smoothly with interpolation on and visibly step at 20 Hz with it
+off. Closing the window leaves cleanly.
 
 Headless, measured (not eyeballed) confirmation of the same claim: at a
 simulated 200ms round trip, the predicting client's on-screen position

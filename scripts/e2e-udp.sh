@@ -38,3 +38,18 @@ if ! grep -q "lead=" "$loadclient_out"; then
   echo "FAIL: tw_loadclient printed no lead= stats line" >&2
   exit 1
 fi
+
+if ! grep -q "deltas_applied=" "$loadclient_out"; then
+  echo "FAIL: tw_loadclient printed no deltas_applied= stats line" >&2
+  exit 1
+fi
+
+# The server prints its snapshot_bytes= summary only once it stops (after
+# --ticks 600), so wait for it to exit naturally rather than kill it early.
+wait "$server_pid" 2>/dev/null || true
+
+if ! grep -q "snapshot_bytes=" "$server_out"; then
+  echo "FAIL: tw_server printed no snapshot_bytes= summary" >&2
+  cat "$server_out" >&2
+  exit 1
+fi

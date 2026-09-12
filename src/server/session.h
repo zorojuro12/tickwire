@@ -26,6 +26,13 @@ class SessionTable {
   bool authorize(const net::Endpoint& from, uint32_t player_id) const noexcept;
   void touch(const net::Endpoint& from, uint32_t now_tick, uint32_t input_tick) noexcept;
   uint32_t lastInputTick(uint32_t player_id) const noexcept;
+  // Records that this endpoint's session has acknowledged holding the snapshot
+  // at `snapshot_tick`. Monotonic: an older tick is ignored. No-op for an
+  // endpoint with no live session.
+  void noteSnapshotAck(const net::Endpoint& from, uint32_t snapshot_tick) noexcept;
+  // The newest snapshot tick this player has acknowledged; 0 when the player is
+  // unknown or has acknowledged nothing.
+  uint32_t ackedSnapshotTick(uint32_t player_id) const noexcept;
   bool tryFire(uint32_t player_id, uint32_t now_tick) noexcept;  // false while cooling down
   bool remove(const net::Endpoint& from) noexcept;
   // Removes every session silent for >= kSessionTimeoutTicks; writes the
@@ -44,6 +51,7 @@ class SessionTable {
     uint32_t last_seen_tick = 0;
     uint32_t last_input_tick = 0;
     uint32_t last_fire_tick = 0;
+    uint32_t acked_snapshot_tick = 0;
     bool ever_fired = false;
     bool live = false;
   };

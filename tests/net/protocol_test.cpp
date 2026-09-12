@@ -81,7 +81,7 @@ TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
       mutated(0, 0x55),  // wrong magic
       mutated(4, 0x03),  // wrong version
       mutated(5, 0x00),  // MsgType::kInvalid
-      mutated(5, 0x06),  // one past kMaxMsgType
+      mutated(5, 0x07),  // one past kMaxMsgType
       mutated(5, 0xFF),
   };
 
@@ -157,6 +157,32 @@ TEST(ProtocolHeaderTest, RejectsPayloadLenThatDisagreesWithThePacket) {
   ByteReader r(golden28);
   PacketHeader out;
   EXPECT_TRUE(decodeHeader(r, out));
+}
+
+TEST(ProtocolTest, HeaderAcceptsSnapshotDeltaType) {
+  EXPECT_EQ(static_cast<uint8_t>(MsgType::kSnapshotDelta), 6);
+  EXPECT_EQ(kMaxMsgType, 6);
+
+  PacketHeader h = goldenHeader();
+  h.type = MsgType::kSnapshotDelta;
+  h.payload_len = 0;
+
+  std::array<std::byte, kHeaderBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeHeader(h, w));
+
+  ByteReader r(buf);
+  PacketHeader out;
+  ASSERT_TRUE(decodeHeader(r, out));
+  EXPECT_EQ(out.type, MsgType::kSnapshotDelta);
+
+  std::array<std::byte, kHeaderBytes> raw_type_7 = kGoldenHeaderBytes;
+  raw_type_7[5] = std::byte{0x07};
+  raw_type_7[6] = std::byte{0x00};  // payload_len low byte
+  raw_type_7[7] = std::byte{0x00};  // payload_len high byte
+  ByteReader r7(raw_type_7);
+  PacketHeader out7;
+  EXPECT_FALSE(decodeHeader(r7, out7));
 }
 
 TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {

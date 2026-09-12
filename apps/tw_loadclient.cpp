@@ -115,9 +115,11 @@ int main(int argc, char** argv) {
   for (uint32_t i = 0; i < players; ++i) {
     const client::Client<net::UdpTransport>& c = *clients[i];
     std::printf(
-        "player=%u rtt_ms=%u lead=%d pred_p50=%.2f pred_p99=%.2f pred_worst=%.2f snaps=%u\n",
+        "player=%u rtt_ms=%u lead=%d pred_p50=%.2f pred_p99=%.2f pred_worst=%.2f snaps=%u "
+        "deltas_applied=%u deltas_dropped=%u\n",
         c.playerId(), c.rttMs(), c.clockLead(), c.predictionError().p50(),
-        c.predictionError().p99(), c.predictionError().worst(), c.clockSnaps());
+        c.predictionError().p99(), c.predictionError().worst(), c.clockSnaps(),
+        c.deltasApplied(), c.deltasDropped());
   }
   std::fflush(stdout);
 

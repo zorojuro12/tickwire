@@ -11,6 +11,8 @@
 #include "net/loopback.h"
 #include "net/protocol.h"
 #include "net/simulated.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "server/server.h"
 #include "sim/sim.h"
 #include "support/recording_transport.h"
@@ -637,7 +639,10 @@ TEST(ClientTest, ClientAndServerConvergeInMemory) {
     pump();
   }
 
-  EXPECT_GE(c->snapshotsReceived(), 15u);
+  // Total updates received, not just full snapshots: once this client's
+  // inputs start acknowledging a held baseline, the server switches most
+  // broadcasts to kSnapshotDelta, so snapshotsReceived() alone undercounts.
+  EXPECT_GE(c->snapshotsReceived() + c->deltasApplied(), 15u);
   ASSERT_GT(c->latestSnapshot().count, 0u);
   const sim::PlayerState* own = nullptr;
   for (uint32_t i = 0; i < c->latestSnapshot().count; ++i) {
@@ -711,6 +716,261 @@ TEST(ClientTest, ClientAndServerConvergeThroughSimulatedLatency) {
   ASSERT_GE(delayed_iterations_to_join, 0);
   EXPECT_GE(c->joinAttempts(), 1u);
   EXPECT_GT(delayed_iterations_to_join, baselineIterationsToJoin);
+}
+
+TEST(ClientTest, InputAcknowledgesTheNewestSnapshotHeld) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  ASSERT_TRUE(c.sendInput(16, 0.0f, 0.0f, 0.0f, 0.0f, false));
+  {
+    const RecordingTransport::Sent& s = tp->sentAt(tp->sentCount() - 1);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.ack_tick, 0u);
+  }
+
+  injectSnapshot(*tp, 77, 5000, onePlayerSnapshot(77, 0.0f, 0.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+
+  ASSERT_TRUE(c.sendInput(48, 0.0f, 0.0f, 0.0f, 0.0f, false));
+  {
+    const RecordingTransport::Sent& s = tp->sentAt(tp->sentCount() - 1);
+    net::ByteReader r(std::span<const std::byte>(s.data).subspan(0, s.len));
+    net::PacketHeader h;
+    ASSERT_TRUE(net::decodeHeader(r, h));
+    EXPECT_EQ(h.ack_tick, 77u);
+  }
+}
+
+void injectSnapshotDelta(RecordingTransport& tp, const net::PacketHeader& h,
+                          std::span<const std::byte> payload) {
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+TEST(ClientTest, AppliesADeltaAgainstAHeldBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  sim::WorldSnapshot baseline{};
+  baseline.tick = 100;
+  baseline.count = 2;
+  baseline.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  baseline.players[1] = {.id = 2, .x = 1.0f, .y = 1.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 100, 5000, baseline, 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  sim::WorldSnapshot current = baseline;
+  current.tick = 103;
+  current.players[1] = {
+      .id = 2, .x = 4.0f, .y = 1.0f, .vx = sim::kMoveSpeed, .vy = 0.0f, .radius = 0.5f};
+
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  ASSERT_TRUE(net::encodeSnapshotDelta(baseline, current, dw));
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.latestSnapshotTick(), 103u);
+  bool found = false;
+  for (uint32_t i = 0; i < c.latestSnapshot().count; ++i) {
+    if (c.latestSnapshot().players[i].id != 2) continue;
+    found = true;
+    EXPECT_FLOAT_EQ(c.latestSnapshot().players[i].x, 4.0f);
+    EXPECT_FLOAT_EQ(c.latestSnapshot().players[i].vx, sim::kMoveSpeed);
+  }
+  EXPECT_TRUE(found);
+  EXPECT_EQ(c.deltasApplied(), 1u);
+  EXPECT_EQ(c.deltasDropped(), 0u);
+  EXPECT_NE(c.snapshots().find(103), nullptr);
+}
+
+TEST(ClientTest, DropsADeltaAgainstAnUnheldBaseline) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  injectSnapshot(*tp, 100, 5000, onePlayerSnapshot(100, 10.0f, 20.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  dw.u32(103);  // tick
+  dw.u32(55);   // baseline_tick -- never received
+  dw.u32(0);    // present_mask
+  dw.u32(0);    // changed_mask
+  ASSERT_TRUE(dw.ok());
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.deltasDropped(), 1u);
+  EXPECT_EQ(c.deltasApplied(), 0u);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
+  ASSERT_EQ(c.latestSnapshot().count, 1u);
+  EXPECT_EQ(c.latestSnapshot().players[0].x, 10.0f);
+  EXPECT_EQ(c.latestSnapshot().players[0].y, 20.0f);
+}
+
+TEST(ClientTest, RemotePlayerIsInterpolatedBetweenSnapshots) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  sim::WorldSnapshot snap1{};
+  snap1.tick = 100;
+  snap1.count = 2;
+  snap1.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  snap1.players[1] = {.id = 2, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 100, 5000, snap1, 0);
+  c.tick(32);
+
+  sim::WorldSnapshot snap2 = snap1;
+  snap2.tick = 104;
+  snap2.players[1] = {.id = 2, .x = 10.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 104, 5064, snap2, 100);
+
+  uint32_t now_ms = 48;
+  for (int i = 0; i < 64 && c.renderTick() != 102; ++i) {
+    c.tick(now_ms);
+    now_ms += 16;
+  }
+  ASSERT_EQ(c.renderTick(), 102u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.remotePosition(2, x, y));
+  EXPECT_EQ(x, 5.0f);
+
+  EXPECT_FALSE(c.remotePosition(c.playerId(), x, y));
+}
+
+TEST(ClientTest, InterpolationToggleFallsBackToTheNewestSnapshot) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  sim::WorldSnapshot snap1{};
+  snap1.tick = 100;
+  snap1.count = 2;
+  snap1.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  snap1.players[1] = {.id = 2, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 100, 5000, snap1, 0);
+  c.tick(32);
+
+  sim::WorldSnapshot snap2 = snap1;
+  snap2.tick = 104;
+  snap2.players[1] = {.id = 2, .x = 10.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = 0.5f};
+  injectSnapshot(*tp, 104, 5064, snap2, 100);
+
+  uint32_t now_ms = 48;
+  for (int i = 0; i < 64 && c.renderTick() != 102; ++i) {
+    c.tick(now_ms);
+    now_ms += 16;
+  }
+  ASSERT_EQ(c.renderTick(), 102u);
+
+  float x = 0.0f, y = 0.0f;
+  ASSERT_TRUE(c.remotePosition(2, x, y));
+  EXPECT_EQ(x, 5.0f);
+
+  c.setInterpolationEnabled(false);
+  EXPECT_FALSE(c.interpolationEnabled());
+  ASSERT_TRUE(c.remotePosition(2, x, y));
+  EXPECT_EQ(x, 10.0f);
+
+  c.setInterpolationEnabled(true);
+  EXPECT_TRUE(c.interpolationEnabled());
+  ASSERT_TRUE(c.remotePosition(2, x, y));
+  EXPECT_EQ(x, 5.0f);
+}
+
+TEST(ClientTest, RejectsASnapshotWhosePayloadTickDisagreesWithItsHeader) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  // A joined server always sets the header tick and the encoded payload's
+  // tick from the same world_.tick() value; only a source willing to forge
+  // the joined server's address (the same precondition the P3 review
+  // already accepted the client has no defense against) could produce a
+  // mismatch. Closing it is still cheap: it's what SnapshotRing keys its
+  // entries by, and net::SnapshotDelta::baseline_tick lookups by, so a
+  // decoupled pair would let a forged packet corrupt that keying.
+  sim::WorldSnapshot mismatched = onePlayerSnapshot(100, 5.0f, 5.0f, 0.0f, 0.0f);
+  injectSnapshot(*tp, /*header tick=*/105, 5000, mismatched, 0);
+  c.tick(32);
+
+  EXPECT_EQ(c.latestSnapshotTick(), 0u);
+  EXPECT_EQ(c.snapshots().find(100), nullptr);
+  EXPECT_EQ(c.snapshots().find(105), nullptr);
+
+  // A matched pair is still accepted normally.
+  injectSnapshot(*tp, 100, 5016, onePlayerSnapshot(100, 5.0f, 5.0f, 0.0f, 0.0f), 0);
+  c.tick(48);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
+}
+
+TEST(ClientTest, CountsADroppedDeltaEvenWhenItsBaselineIsHeld) {
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 500);
+  c.tick(16);
+
+  // Baseline holds only player 1.
+  injectSnapshot(*tp, 100, 5000, onePlayerSnapshot(100, 0.0f, 0.0f, 0.0f, 0.0f), 0);
+  c.tick(32);
+  ASSERT_EQ(c.latestSnapshotTick(), 100u);
+
+  // A delta naming player 2 as present-but-unchanged (bit set in
+  // present_mask, clear in changed_mask) with a baseline the client
+  // genuinely holds (100) -- applySnapshotDelta must fail, since player 2
+  // has no baseline record to copy, not because the baseline lookup
+  // itself failed.
+  std::array<std::byte, net::kMaxPacket> delta_payload{};
+  net::ByteWriter dw(delta_payload);
+  dw.u32(103);        // tick
+  dw.u32(100);         // baseline_tick -- held
+  dw.u32(0b10);        // present_mask -- player 2 only
+  dw.u32(0);           // changed_mask -- claimed unchanged
+  ASSERT_TRUE(dw.ok());
+
+  net::PacketHeader dh;
+  dh.type = net::MsgType::kSnapshotDelta;
+  dh.tick = 103;
+  injectSnapshotDelta(*tp, dh, std::span<const std::byte>(delta_payload).subspan(0, dw.size()));
+  c.tick(48);
+
+  EXPECT_EQ(c.deltasDropped(), 1u);
+  EXPECT_EQ(c.deltasApplied(), 0u);
+  EXPECT_EQ(c.latestSnapshotTick(), 100u);
 }
 
 }  // namespace
