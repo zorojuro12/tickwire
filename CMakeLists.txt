@@ -117,6 +117,13 @@ add_test(NAME server_app_threads2_spsc COMMAND tw_server --port 0 --ticks 5 --th
 set_tests_properties(server_app_threads2_spsc PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=spsc")
 add_test(NAME server_app_threads2_mutex COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring mutex)
 set_tests_properties(server_app_threads2_mutex PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=mutex")
+add_test(NAME server_app_sim_load
+  COMMAND tw_server --port 0 --ticks 20 --threads 2 --ring spsc --sim-load-us 20000)
+# CMake's built-in regex engine has no {n} bounded-repetition support, so the
+# plan's `[0-9]{6}` is expanded here to six literal [0-9] terms with the same
+# meaning: a p50 of >= 17'000'000 ns (8-9 digits, leading "17"-"19" or "2"-"9").
+set_tests_properties(server_app_sim_load PROPERTIES
+  PASS_REGULAR_EXPRESSION "jitter_ns p50=(1[7-9]|[2-9][0-9])[0-9][0-9][0-9][0-9][0-9][0-9]")
 
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)
