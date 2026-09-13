@@ -17,12 +17,12 @@ changed or been discovered since.
 |---|---|
 | `src/sim/` | `libsim` — deterministic simulation core (`sim::World`) and POD payload types. No I/O, no wall-clock reads, no allocation. |
 | `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, framing (`net::framePacket`), and the `Transport` implementations (UDP, loopback, simulated). |
-| `src/server/` | `libserver` — `Server<T>`, `SessionTable` (endpoint↔player binding), `PacketRing` (I/O↔sim seam), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), and the monotonic clock. |
+| `src/server/` | `libserver` — `Server<T, Ring>`, `SessionTable` (endpoint↔player binding), the I/O↔sim seam (`PacketRing`, `MutexRing`, or the lock-free `SpscRing` — swappable via `Ring`), `ThreadedRunner` (splits I/O and simulation across two real threads over that seam), `JitterStats` (percentile recorder), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), and the monotonic clock (`monotonicMs`/`monotonicNs`). |
 | `src/client/` | `libclient` — `Client<T>` (join handshake, input send, snapshot store) and the pure world→screen view mapping used by the raylib renderer. |
 | `apps/` | Thin executables: `tw_server`, `tw_loadclient` (headless load client), `tw_client` (raylib demo client). Argument parsing, a clock, and a loop — no logic of their own. |
 | `scripts/` | `tw` (container invocation), `ci.sh`, `demo.sh`, `e2e-udp.sh`, toolchain/determinism verification scripts. |
 | `tests/` | GoogleTest suites, mirroring `src/` by subdirectory (`tests/net/`, `tests/server/`, `tests/client/`, ...); `tests/support/` holds fixtures shared across suites. |
-| `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness). |
+| `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness) or measurement (`bench_queue`, the queue handoff latency microbenchmark). |
 | `docs/` | Specs, phase plans, project history, and frozen format references (e.g. `wire-format.md`). |
 
 ## Verified constraints
@@ -52,6 +52,25 @@ plan execution, not assumed.
   different problem than P3's local-only prediction. Verified by
   `ClientTest.RemotePlayerIsInterpolatedBetweenSnapshots`, which asserts
   `remotePosition(playerId(), ...)` returns `false` for the client's own id.
+- **`ThreadedRunner`'s two-thread split has exactly one shared mutable
+  object (`Server`'s `Ring`) and one shared-but-mutex-free resource (the
+  transport) — every other `Server` member is single-threaded by
+  construction.** The I/O thread owns `ingest()`/`ingestBatch()`; the sim
+  loop (running on whichever thread calls `run()`) owns `tick()` and
+  everything it touches (`world_`, `sessions_`, `inputs_`, every counter
+  `tick()`/`route()` updates). `ingest_overflows_` and `packets_ingested_`
+  are the two exceptions written by the I/O thread instead — still safe
+  because they're read only after both threads join, never concurrently
+  with the write. **The transport needs no mutex**: `UdpTransport::send()`/
+  `tryReceive()` (`src/net/udp.cpp`) touch only the socket fd and mutate no
+  shared member state, and POSIX guarantees concurrent `sendto`/`recvfrom`
+  on one fd. Adding a transport mutex here would serialize the two threads
+  and make any benchmark measure lock contention instead of the ring's own
+  synchronization cost — verified by design before Task 7 was implemented,
+  not discovered as a fix afterward. See `docs/project-history.md`'s P5
+  section for the full reasoning and the security review that checked it
+  against the real `UdpTransport` implementation rather than assuming the
+  `Transport` concept guarantees it.
 
 ## Build and test
 
