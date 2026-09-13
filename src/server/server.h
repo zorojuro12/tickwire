@@ -21,7 +21,7 @@ namespace server {
 inline constexpr uint32_t kSnapshotIntervalTicks = 3;  // 60 Hz sim -> 20 Hz snapshots
 inline constexpr size_t kIngestCapacity = 256;         // power of two, per PacketRing
 
-template <net::Transport T>
+template <net::Transport T, typename Ring = PacketRing<net::PacketSlot, kIngestCapacity>>
 class Server {
  public:
   explicit Server(T& transport) noexcept : transport_(transport) {}
@@ -326,7 +326,7 @@ class Server {
   T& transport_;
   sim::World world_;
   SessionTable sessions_;
-  PacketRing<net::PacketSlot, kIngestCapacity> ring_;
+  Ring ring_;
   std::array<InputBuffer, sim::kMaxPlayers> inputs_{};
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};

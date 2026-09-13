@@ -12,6 +12,7 @@
 #include "net/protocol.h"
 #include "net/snapshot_delta.h"
 #include "net/transport.h"
+#include "server/spsc_ring.h"
 #include "sim/sim.h"
 #include "sim/world.h"
 #include "support/recording_transport.h"
@@ -105,6 +106,40 @@ TEST(ServerTest, JoinRequestIsAcceptedBoundAndAnswered) {
   ASSERT_EQ(snap2.count, 1u);
   EXPECT_EQ(snap2.players[0].x, -35.0f);
   EXPECT_EQ(snap2.players[0].y, -35.0f);
+}
+
+TEST(ServerTest, JoinAndInputBehaveTheSameOnAnExplicitlyNamedRingType) {
+  auto client_tp = std::make_unique<net::LoopbackTransport>(kClientEp);
+  auto server_tp = std::make_unique<net::LoopbackTransport>(kServerEp);
+  client_tp->connect(*server_tp);
+  auto srv = std::make_unique<
+      Server<net::LoopbackTransport, SpscRing<net::PacketSlot, kIngestCapacity>>>(*server_tp);
+
+  ASSERT_TRUE(sendTo(*client_tp, kServerEp, net::MsgType::kJoinRequest, {}, 1));
+  EXPECT_EQ(srv->ingest(), 1u);
+  srv->tick(0);
+  ASSERT_EQ(srv->playerFor(kClientEp), 1u);
+
+  const sim::InputCommand in{.player_id = 1,
+                              .tick = 2,
+                              .move_x = 1.0f,
+                              .move_y = 0.0f,
+                              .aim_x = 0.0f,
+                              .aim_y = 0.0f,
+                              .fire = false};
+  std::array<std::byte, net::kInputBytes> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeInput(in, pw));
+  ASSERT_TRUE(sendTo(*client_tp, kServerEp, net::MsgType::kInput, payload, 2));
+  EXPECT_EQ(srv->ingest(), 1u);
+
+  srv->tick(16);
+  EXPECT_EQ(srv->worldTick(), 2u);
+
+  sim::WorldSnapshot snap{};
+  srv->world().writeSnapshot(snap);
+  ASSERT_EQ(snap.count, 1u);
+  EXPECT_EQ(snap.players[0].vx, sim::kMoveSpeed);
 }
 
 TEST(ServerTest, FullSessionTableRejectsWithLeave) {
