@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(tickwire CXX)
 
+find_package(Threads REQUIRED)
+
 include(FetchContent)
 FetchContent_Declare(googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
@@ -27,7 +29,7 @@ add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing
 target_link_libraries(libnet PUBLIC libsim)
 
 add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp)
-target_link_libraries(libserver PUBLIC libnet)
+target_link_libraries(libserver PUBLIC libnet Threads::Threads)
 
 add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp src/client/interpolation.cpp)
 target_include_directories(libclient PUBLIC src)
@@ -64,6 +66,10 @@ tw_add_test(session_test tests/server/session_test.cpp)
 tw_add_test(input_buffer_test tests/server/input_buffer_test.cpp)
 tw_add_test(server_test tests/server/server_test.cpp)
 tw_add_test(timer_test tests/server/timer_test.cpp)
+tw_add_test(jitter_stats_test tests/server/jitter_stats_test.cpp)
+tw_add_test(mutex_ring_test tests/server/mutex_ring_test.cpp)
+tw_add_test(spsc_ring_test tests/server/spsc_ring_test.cpp)
+tw_add_test(threaded_runner_test tests/server/threaded_runner_test.cpp)
 tw_add_test(client_test tests/client/client_test.cpp)
 tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
 tw_add_test(prediction_test tests/client/prediction_test.cpp)
@@ -91,6 +97,12 @@ if(TW_SANITIZER MATCHES "thread")
   add_test(NAME tsan_detects_race COMMAND fault_race)
   set_tests_properties(tsan_detects_race PROPERTIES
     PASS_REGULAR_EXPRESSION "data race")
+
+  add_executable(fault_relaxed_ring tests/faults/relaxed_ring.cpp)
+  target_link_libraries(fault_relaxed_ring PRIVATE tickwire_sim_flags Threads::Threads)
+  add_test(NAME tsan_detects_relaxed_ring COMMAND fault_relaxed_ring)
+  set_tests_properties(tsan_detects_relaxed_ring PROPERTIES
+    PASS_REGULAR_EXPRESSION "data race")
 endif()
 
 add_executable(tw_server apps/tw_server.cpp)
@@ -99,6 +111,22 @@ add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
 set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
 add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
 set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+add_test(NAME server_app_threads1 COMMAND tw_server --port 0 --ticks 5 --threads 1)
+set_tests_properties(server_app_threads1 PROPERTIES PASS_REGULAR_EXPRESSION "threads=1")
+add_test(NAME server_app_threads2_spsc COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring spsc)
+set_tests_properties(server_app_threads2_spsc PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=spsc")
+add_test(NAME server_app_threads2_mutex COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring mutex)
+set_tests_properties(server_app_threads2_mutex PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=mutex")
+add_test(NAME server_app_batch_ingest
+  COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring spsc --batch-ingest)
+set_tests_properties(server_app_batch_ingest PROPERTIES PASS_REGULAR_EXPRESSION "batch_ingest=1")
+add_test(NAME server_app_sim_load
+  COMMAND tw_server --port 0 --ticks 20 --threads 2 --ring spsc --sim-load-us 20000)
+# CMake's built-in regex engine has no {n} bounded-repetition support, so the
+# plan's `[0-9]{6}` is expanded here to six literal [0-9] terms with the same
+# meaning: a p50 of >= 17'000'000 ns (8-9 digits, leading "17"-"19" or "2"-"9").
+set_tests_properties(server_app_sim_load PROPERTIES
+  PASS_REGULAR_EXPRESSION "jitter_ns p50=(1[7-9]|[2-9][0-9])[0-9][0-9][0-9][0-9][0-9][0-9]")
 
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)
@@ -112,6 +140,21 @@ add_test(NAME e2e_udp
 # overridden by a regex match elsewhere in the output. Exit code alone
 # (set -e/pipefail in the script, plus tw_loadclient's own
 # joined==players return value) is the pass/fail signal here.
+
+add_executable(bench_queue tools/bench_queue.cpp)
+target_link_libraries(bench_queue PRIVATE libserver)
+add_test(NAME bench_queue_spsc COMMAND bench_queue --ring spsc --items 10000 --rate 0)
+set_tests_properties(bench_queue_spsc PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+add_test(NAME bench_queue_mutex COMMAND bench_queue --ring mutex --items 10000 --rate 0)
+set_tests_properties(bench_queue_mutex PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+
+add_test(NAME bench_smoke
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/bench.sh" --smoke
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# No PASS_REGULAR_EXPRESSION, per the same reasoning as e2e_udp: that
+# property replaces the exit code as CTest's sole pass/fail signal once set,
+# which would mask a set -e failure inside the script. Exit code alone is the
+# signal here.
 
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)

@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <vector>
@@ -178,6 +179,111 @@ TEST(UdpTransportTest, ClosesSocketOnDestructionAndIsMoveOnly) {
 
   static_assert(!std::is_copy_constructible_v<UdpTransport>);
   static_assert(!std::is_copy_assignable_v<UdpTransport>);
+}
+
+TEST(UdpTransportTest, OversizedDatagramIsSkippedAndCounted) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  sendRawDatagram(receiver->localEndpoint(), 1400);
+
+  const std::array<std::byte, 8> payload = {std::byte{1}, std::byte{2}, std::byte{3},
+                                             std::byte{4}, std::byte{5}, std::byte{6},
+                                             std::byte{7}, std::byte{8}};
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload));
+
+  PacketSlot slot;
+  ASSERT_TRUE(pollReceive(*receiver, slot));
+  EXPECT_EQ(slot.len, 8u);
+  EXPECT_EQ(receiver->oversizedSkipped(), 1u);
+}
+
+TEST(UdpTransportTest, ReceiveBatchFillsSeveralSlotsInOneCall) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  const std::array<std::byte, 8> payload = {std::byte{1}, std::byte{2}, std::byte{3},
+                                             std::byte{4}, std::byte{5}, std::byte{6},
+                                             std::byte{7}, std::byte{8}};
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload));
+  }
+
+  auto slots = std::make_unique<std::array<PacketSlot, 8>>();
+  size_t filled = 0;
+  for (int i = 0; i < 1000 && filled == 0; ++i) {
+    filled = receiver->receiveBatch(std::span<PacketSlot>(*slots));
+  }
+  ASSERT_EQ(filled, 5u);
+  for (size_t i = 0; i < 5; ++i) {
+    EXPECT_EQ((*slots)[i].len, 8u);
+    EXPECT_EQ((*slots)[i].peer, sender->localEndpoint());
+  }
+
+  EXPECT_EQ(receiver->receiveBatch(std::span<PacketSlot>(*slots)), 0u);
+}
+
+TEST(UdpTransportTest, ReceiveBatchKeepsPayloadAndMetadataPairedAcrossASkippedDatagram) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  // An oversized datagram lands between two well-formed ones in the same
+  // batch. If receiveBatch() compacts metadata into slots[filled] without
+  // also moving the payload bytes (which recvmmsg wrote at slots[i].data,
+  // not slots[filled].data), "b"'s reported metadata gets paired with "a"'s
+  // bytes -- a real sender/length misattribution, not just a lost packet.
+  const std::array<std::byte, 4> payload_a = {std::byte{'a'}, std::byte{'a'}, std::byte{'a'},
+                                               std::byte{'a'}};
+  const std::array<std::byte, 4> payload_b = {std::byte{'b'}, std::byte{'b'}, std::byte{'b'},
+                                               std::byte{'b'}};
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload_a));
+  sendRawDatagram(receiver->localEndpoint(), 1400);
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload_b));
+
+  auto slots = std::make_unique<std::array<PacketSlot, 8>>();
+  size_t filled = 0;
+  for (int i = 0; i < 1000 && filled == 0; ++i) {
+    filled = receiver->receiveBatch(std::span<PacketSlot>(*slots));
+  }
+  ASSERT_EQ(filled, 2u);
+  EXPECT_EQ((*slots)[0].len, 4u);
+  EXPECT_EQ(std::memcmp((*slots)[0].data.data(), payload_a.data(), 4), 0);
+  EXPECT_EQ((*slots)[1].len, 4u);
+  EXPECT_EQ(std::memcmp((*slots)[1].data.data(), payload_b.data(), 4), 0);
+  EXPECT_EQ(receiver->oversizedSkipped(), 1u);
+}
+
+TEST(UdpTransportTest, OversizedRetryLoopIsCappedPerCall) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  for (int i = 0; i < 20; ++i) {
+    sendRawDatagram(receiver->localEndpoint(), 1400);
+  }
+
+  PacketSlot slot;
+  EXPECT_FALSE(receiver->tryReceive(slot));
+  EXPECT_EQ(receiver->oversizedSkipped(), kMaxOversizedSkipsPerCall);
+
+  // Only 20 oversized datagrams were ever sent, so a second call can drain at
+  // most the remaining 4 before the socket goes empty — it can never reach a
+  // second full cap (32 total). Asserting >= here (per the plan's documented
+  // fallback) still proves the cap is per-call, not a permanent wedge: the
+  // remaining datagrams got drained by a later call rather than lost.
+  EXPECT_FALSE(receiver->tryReceive(slot));
+  EXPECT_GE(receiver->oversizedSkipped(), kMaxOversizedSkipsPerCall);
 }
 
 }  // namespace

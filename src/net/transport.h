@@ -15,6 +15,7 @@ struct Endpoint {
 };
 
 inline constexpr size_t kMaxPacket = 1200;  // stay under the IP fragmentation threshold
+inline constexpr size_t kMaxOversizedSkipsPerCall = 16;  // bound the per-call retry loop
 
 struct PacketSlot {
   Endpoint peer;

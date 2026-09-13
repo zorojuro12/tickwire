@@ -1018,4 +1018,178 @@ it authoritative for every architectural decision. Left uncorrected it would
 tell a cold planning session to run the architectural layer again at P5, which
 is exactly what §2 itself warns against.
 
-<!-- Next entries: P5 execution — threading, SpscRing, benchmark numbers -->
+**Decision — the ring became a template parameter on `Server`, defaulted to
+the existing `PacketRing`.** Every existing `Server<T>` spelling compiles
+unchanged; `Server<T, Ring = PacketRing<...>>` lets `MutexRing` and `SpscRing`
+substitute in at the same seam, verified behavior-preserving (not just
+compiling) by driving the existing join/input path against
+`Server<LoopbackTransport, SpscRing<...>>` in Task 6.
+
+**Decision — the transport is shared between the I/O and sim threads without
+a mutex, verified against the real implementation rather than assumed from
+the Transport concept.** `UdpTransport::send()`/`tryReceive()`
+(`src/net/udp.cpp`) touch only the socket fd and mutate no shared member
+state, and POSIX guarantees concurrent `sendto`/`recvfrom` on one fd. Adding a
+transport mutex would have serialized the two threads and made the benchmark
+measure lock contention on the wrong thing. `ring_` is the only genuinely
+shared mutable state between the two threads; every other `Server` member
+(`world_`, `sessions_`, `inputs_`, every tick-side counter) is touched only by
+the calling (sim) thread, and `ingest_overflows_`/`packets_ingested_` are
+written only by the I/O thread and read only after both threads join.
+
+**Decision — no egress queue, per the design doc's standing instruction.**
+Egress stays `sendto`-per-packet on the sim thread regardless of ring choice
+or `recvmmsg` adoption; nothing measured this phase produced a number that
+would justify one.
+
+**Decision — `recvmmsg` batching is built but not adopted as the default.**
+Task 10 built `UdpTransport::receiveBatch()` and `Server::ingestBatch()` as a
+measured, opt-in `--batch-ingest` variant. Task 11's Group 4 measurement
+(19,044 vs. 19,129 `packets_ingested` over an identical 600-tick, 32-player
+run — under 0.5% apart) showed no measurable win at Tickwire's actual load,
+so the unbatched `tryReceive()` path remains the default per the
+`benchmark-optimization-loop` skill's promotion gate ("adopt only if it
+measurably wins here"). Full numbers and interpretation in
+`docs/benchmarks.md`.
+
+**Finding — the design doc's "concurrent players before jitter exceeds
+budget" row has no answer within `sim::kMaxPlayers`, exactly as the planning
+session's self-review predicted before any number was measured.** Group 1's
+p99 sits at essentially the same ~17.0 ms from 1 to 32 players, no visible
+trend. The real jitter cliff (found via Group 2's synthetic `--sim-load-us`
+knob, since player count alone can't reach it) sits between 16 ms and 18 ms
+of added per-tick work. Full tables in `docs/benchmarks.md`.
+
+**Finding — lock-free measurably beats mutex at every rate tested, but the
+gap is three-plus orders of magnitude too small to matter at Tickwire's real
+640 packets/sec.** This is a more precise statement than the plan's own
+predicted "indistinguishable at real load" — spsc's real-load p50/p99 (500 ns
+/ 4,101 ns) are genuinely, repeatably lower than mutex's (800 ns / 5,300 ns),
+not noise, but the absolute gap (hundreds of nanoseconds) against a
+16,666,667 ns tick budget has no practical consequence for this project. The
+plan's Global Constraints treat this as the intended outcome, and it's
+reported as measured rather than rounded off to match the prediction exactly.
+
+**Finding — a cross-core `CLOCK_MONOTONIC` read can show a sub-microsecond
+apparent inversion on this project's WSL2 development environment, discovered
+by `scripts/bench.sh` dogfooding itself before the real measurement run.**
+`tools/bench_queue.cpp`'s handoff-latency measurement originally computed
+`now_ns - stamp` as unsigned subtraction across the producer/consumer thread
+pair; a tiny real (not logic-bug) cross-core clock skew wrapped this to a
+value near `2^64`, poisoning every percentile in the affected run. Not a ring
+defect — `SpscRing`'s own TSan-verified ordering tests (Task 4) are
+unaffected; monotonicity is a per-thread guarantee, not a cross-core one, and
+virtualized environments are exactly where this shows up. Fixed by computing
+the delta in `int64_t` and clamping negative results to zero.
+
+### Task 12 boundary — mandatory security review findings
+
+Threat model (unchanged from P1–P4): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/server/spsc_ring.h`,
+`src/server/mutex_ring.h`, `src/server/threaded_runner.h`,
+`src/server/jitter_stats.h`, the P5 diffs to `src/net/udp.{h,cpp}` and
+`src/server/server.h`, `tools/bench_queue.cpp`, and `apps/tw_server.cpp`.
+
+**Fixed (CRITICAL, found by `cpp-reviewer`) — `receiveBatch()` misattributed
+payload bytes to the wrong sender/length when a batch mixed an oversized
+datagram with valid ones.** `recvmmsg` writes message `i`'s payload into
+`slots[i].data` (that's what `iovs[i]` pointed at), but the metadata-
+compaction loop wrote message `i`'s length and sender into `slots[filled]`
+without moving the bytes. Once an earlier message in the same `recvmmsg` call
+was skipped as oversized (`filled < i` from then on), every later accepted
+slot reported a length and sender that belonged to message `i`, paired with
+payload bytes that actually belonged to an earlier, different message — a
+real sender/length misattribution one layer downstream in
+`Server::route()`/`SessionTable::authorize()`, which trusts `slot.peer`
+unconditionally. Reachable via `tw_server --threads 2 --batch-ingest` against
+any traffic mix containing an oversized datagram. Not caught by Task 10's own
+`ReceiveBatchFillsSeveralSlotsInOneCall` test, which only ever sent uniform
+valid packets with nothing to skip. Fixed by `memcpy`-ing the payload
+alongside the metadata whenever `filled != i`. New regression test
+(`ReceiveBatchKeepsPayloadAndMetadataPairedAcrossASkippedDatagram`) sends
+valid-oversized-valid in one batch and asserts both accepted slots' payload
+and metadata are correctly paired; verified RED (mismatched payload) with the
+fix reverted, GREEN restored.
+
+**Fixed (MEDIUM, found by `cpp-reviewer`) — `tw_server`'s SIGINT stop flag had
+no cross-thread visibility guarantee.** `g_stop` was a plain
+`volatile std::sig_atomic_t`, whose standard guarantee covers only a signal
+interrupting execution on the *same* thread that later reads it — no
+cross-thread visibility or ordering. The `--threads 2` path has the SIGINT
+handler write it while a separate polling thread (in `runThreaded()`) reads
+it, exactly the uncovered case. Switched to `std::atomic<int>` with relaxed
+ops (`static_assert`-pinned as always-lock-free — a lock-free atomic is
+explicitly permitted from a signal handler). Not independently regression-
+tested: the race is a memory-model technicality that won't misbehave in
+practice on x86-64/Linux, the same treatment P3's `ClockSync::lead_`
+truncation and the `static_assert` fix in P4 both received for a real but not
+independently observable defect.
+
+**Fixed (LOW, found by `security-reviewer`) — `Server::ingestBatch()`
+undercounted drops during sustained ring saturation.** Unlike `ingest()`
+(which checks ring space *before* pulling from the transport, so a full ring
+just leaves data in the kernel for a later call), `ingestBatch()` has already
+dequeued every staged item via `receiveBatch()` before its own loop runs — so
+a batch landing after the ring fills mid-drain is unrecoverably lost, not
+merely deferred. The prior code counted this as a single overflow regardless
+of how many staged items were actually dropped, which would visibly
+undercount real drops in `docs/benchmarks.md`'s throughput numbers whenever
+`--batch-ingest` hit a full ring. Fixed to add the true remaining count.
+
+**Fixed (LOW, found by `cpp-reviewer`) — a stale comment in
+`threaded_runner.h`.** Claimed "everything else in Server is touched only by
+`tick()`," but `ingest_overflows_` is written by `ingest()`/`ingestBatch()` on
+the I/O thread — still single-writer and safe (read only after both threads
+join), just not what the comment said. Corrected.
+
+**Deferred, not fixed (MEDIUM, found by `security-reviewer`) — the ring's
+FIFO, no-per-source-quota, drop-on-full contract is unchanged from before
+threading existed, but the I/O and sim threads can now genuinely run in
+parallel on separate cores, so a flood can drive the ring to saturation
+faster and keep it saturated longer than the old single-threaded epoll loop's
+incidental throttling allowed.** When the ring is full, a legitimate player's
+packet and an attacker's flood packet are dropped indistinguishably — both
+only ever increment the same aggregate `ingest_overflows_` counter. This is
+the same root cause as the three P2 CRITICAL findings (no session
+authentication, no per-source rate limiting), not a new qualitative
+attacker-vs-victim asymmetry the threading split introduced — a real fix
+needs per-source admission control, which is out of scope for a phase that
+only splits I/O and sim across two threads. Deferred in the same spirit as
+the P2 CRITICALs, recorded here rather than fixed quietly.
+
+**Verified, no fix needed — every other question the plan raised.**
+`Server::ingestBatch()` cannot acquire a ring slot it then fails to fill and
+wedge the ring: it stages received packets into a fully local buffer via
+`receiveBatch()` *first*, completely decoupled from ring state, and only
+afterward pushes staged items into the ring one at a time, `break`-ing
+immediately (not partially) the moment a slot can't be acquired. The per-call
+oversized-datagram cap (`kMaxOversizedSkipsPerCall`, Task 1) has no equivalent
+on the `receiveBatch()` path, but needs none: `tryReceive()`'s cap exists to
+bound an internal unbounded retry loop, while `receiveBatch()` issues exactly
+one `recvmmsg()` syscall per call, itself capped at 64 messages by the
+kernel — the bound is already structural. `--sim-load-us` has zero attacker
+reachability, confirmed by grepping every reference: it is a `tw_server` CLI
+argument only, threaded through `ThreadedRunner`'s constructor, never
+touched by any wire-protocol decode path or packet field. The three P2
+CRITICAL findings (spoofable session authorization, join/snapshot
+amplification, session-table exhaustion) are re-verified unaffected by
+diffing `session.h`/`session.cpp`/`protocol.{h,cpp}`/`docs/wire-format.md`
+against the P4 tip commit — byte-for-byte unchanged, not assumed. The
+`if constexpr` compile-time forks in `threaded_runner.h`
+(`nativeHandle()`/`receiveBatch()` presence) correctly discard the
+unavailable branch for `LoopbackTransport` at compile time, with no runtime
+fallback path that could silently pick the wrong behavior. The 38 KB stack-
+allocated `staging` array in `ingestBatch()` is on a real OS thread's normal
+~8 MB stack (unlike the previously-fixed 8 MB `JitterStats` case in
+`bench_queue.cpp`, which was comparable to an entire stack) — not a safety
+issue, though it does zero-fill on every call regardless of how many slots
+`receiveBatch()` actually returns, a candidate for a future perf pass if
+`--batch-ingest` numbers ever look off. `LoopbackTransport`'s lack of internal
+thread-safety is a latent footgun for a future test author adding genuine
+bidirectional traffic to a `ThreadedRunner`-driven `LoopbackTransport` test,
+but not attacker-reachable (production always uses `UdpTransport`) and no
+current test exercises it concurrently — noted, not fixed.
+
+<!-- Next entries: P5 writeup, finishing-a-development-branch -->

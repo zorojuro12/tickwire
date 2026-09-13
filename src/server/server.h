@@ -21,7 +21,7 @@ namespace server {
 inline constexpr uint32_t kSnapshotIntervalTicks = 3;  // 60 Hz sim -> 20 Hz snapshots
 inline constexpr size_t kIngestCapacity = 256;         // power of two, per PacketRing
 
-template <net::Transport T>
+template <net::Transport T, typename Ring = PacketRing<net::PacketSlot, kIngestCapacity>>
 class Server {
  public:
   explicit Server(T& transport) noexcept : transport_(transport) {}
@@ -47,6 +47,32 @@ class Server {
       ring_.commitWrite();
       ++accepted;
     }
+    return accepted;
+  }
+
+  // Batched receive via the transport's receiveBatch() (recvmmsg), for
+  // transports that support it. Only ever called for such a T -- never
+  // instantiated for one that doesn't, the same way ingest()'s callers never
+  // reach a transport without tryReceive(). Unlike ingest() (which checks
+  // ring space *before* pulling from the transport, so a full ring simply
+  // leaves data in the kernel's receive buffer for a later call),
+  // receiveBatch() has already dequeued every staged item from the kernel
+  // before this loop runs -- so a batch landing after the ring fills mid-
+  // drain is unrecoverably lost, not merely deferred. Every such loss is
+  // counted (not just one per batch), so ingest_overflows_ reflects the
+  // real drop count even under --batch-ingest.
+  size_t ingestBatch() noexcept {
+    constexpr size_t kBatchSize = 32;
+    std::array<net::PacketSlot, kBatchSize> staging{};
+    const size_t filled = transport_.receiveBatch(std::span<net::PacketSlot>(staging));
+    size_t accepted = 0;
+    for (; accepted < filled; ++accepted) {
+      net::PacketSlot* slot = ring_.acquireWrite();
+      if (slot == nullptr) break;
+      *slot = staging[accepted];
+      ring_.commitWrite();
+    }
+    if (accepted < filled) ingest_overflows_ += (filled - accepted);
     return accepted;
   }
 
@@ -326,7 +352,7 @@ class Server {
   T& transport_;
   sim::World world_;
   SessionTable sessions_;
-  PacketRing<net::PacketSlot, kIngestCapacity> ring_;
+  Ring ring_;
   std::array<InputBuffer, sim::kMaxPlayers> inputs_{};
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};
