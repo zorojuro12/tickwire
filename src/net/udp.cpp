@@ -78,17 +78,19 @@ bool UdpTransport::send(const Endpoint& to, std::span<const std::byte> payload) 
 bool UdpTransport::tryReceive(PacketSlot& slot) {
   if (fd_ < 0) return false;
 
+  size_t skipped_this_call = 0;
   for (;;) {
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
     const ssize_t n = ::recvfrom(fd_, slot.data.data(), kMaxPacket, MSG_TRUNC,
                                   reinterpret_cast<sockaddr*>(&from), &from_len);
     if (n < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR) continue;  // not attacker-driven: uncapped retry
       return false;
     }
     if (static_cast<size_t>(n) > kMaxPacket) {
       ++oversized_skipped_;
+      if (++skipped_this_call >= kMaxOversizedSkipsPerCall) return false;
       continue;  // truncated: discard and drain onward
     }
 

@@ -201,5 +201,24 @@ TEST(UdpTransportTest, OversizedDatagramIsSkippedAndCounted) {
   EXPECT_EQ(receiver->oversizedSkipped(), 1u);
 }
 
+TEST(UdpTransportTest, OversizedRetryLoopIsCappedPerCall) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  for (int i = 0; i < 20; ++i) {
+    sendRawDatagram(receiver->localEndpoint(), 1400);
+  }
+
+  PacketSlot slot;
+  EXPECT_FALSE(receiver->tryReceive(slot));
+  EXPECT_EQ(receiver->oversizedSkipped(), kMaxOversizedSkipsPerCall);
+
+  EXPECT_FALSE(receiver->tryReceive(slot));
+  EXPECT_EQ(receiver->oversizedSkipped(), 2 * kMaxOversizedSkipsPerCall);
+}
+
 }  // namespace
 }  // namespace net
