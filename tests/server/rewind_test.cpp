@@ -104,5 +104,48 @@ TEST(RewindTest, RefusesImplausibleViewTicks) {
   EXPECT_TRUE(buildRewoundView(*f.live, *f.history, *f.sessions, boundary, out));
 }
 
+TEST(RewindTest, NeverRewindsAReusedIdIntoItsPreviousOccupant) {
+  auto live = std::make_unique<sim::World>();
+  live->addPlayer(1, -5.0f, 0.0f);
+  live->addPlayer(2, 31.0f, 0.0f);
+
+  auto history = std::make_unique<net::SnapshotRing>();
+  sim::WorldSnapshot s90{};
+  s90.tick = 90;
+  s90.count = 2;
+  s90.players[0] = {.id = 1, .x = -10.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  s90.players[1] = {.id = 2, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  history->store(s90);
+  sim::WorldSnapshot s93{};
+  s93.tick = 93;
+  s93.count = 2;
+  s93.players[0] = {.id = 1, .x = -10.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  s93.players[1] = {.id = 2, .x = 30.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  history->store(s93);
+
+  auto sessions = std::make_unique<SessionTable>();
+  sessions->joinOrGet(kEp1, 0);
+  sessions->joinOrGet(kEp2, 91);
+  sessions->noteSnapshotAck(kEp1, 93);
+
+  {
+    sim::WorldSnapshot out{};
+    const RewindRequest req{.shooter = 1, .view_tick = 92, .fire_tick = 100};
+    ASSERT_TRUE(buildRewoundView(*live, *history, *sessions, req, out));
+    EXPECT_EQ(out.count, 1u);
+    EXPECT_EQ(findById(out, 2), nullptr);
+  }
+  {
+    sim::WorldSnapshot out{};
+    const RewindRequest req{.shooter = 1, .view_tick = 93, .fire_tick = 100};
+    ASSERT_TRUE(buildRewoundView(*live, *history, *sessions, req, out));
+    EXPECT_EQ(out.count, 2u);
+    const sim::PlayerState* target = findById(out, 2);
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->x, 30.0f);
+    EXPECT_EQ(target->y, 0.0f);
+  }
+}
+
 }  // namespace
 }  // namespace server

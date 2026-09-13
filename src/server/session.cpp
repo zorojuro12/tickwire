@@ -42,6 +42,7 @@ uint32_t SessionTable::joinOrGet(const net::Endpoint& from, uint32_t now_tick) {
   e.last_seen_tick = now_tick;
   e.last_input_tick = 0;
   e.last_fire_tick = 0;
+  e.joined_tick = now_tick;
   e.live = true;
   ++count_;
   return new_id;
@@ -90,6 +91,12 @@ uint32_t SessionTable::ackedSnapshotTick(uint32_t player_id) const noexcept {
   int slot = findByPlayer(player_id);
   if (slot < 0) return 0;
   return entries_[static_cast<uint32_t>(slot)].acked_snapshot_tick;
+}
+
+uint32_t SessionTable::joinedTick(uint32_t player_id) const noexcept {
+  int slot = findByPlayer(player_id);
+  if (slot < 0) return 0;
+  return entries_[static_cast<uint32_t>(slot)].joined_tick;
 }
 
 bool SessionTable::tryFire(uint32_t player_id, uint32_t now_tick) noexcept {

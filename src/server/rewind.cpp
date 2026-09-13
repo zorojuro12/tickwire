@@ -29,6 +29,15 @@ bool buildRewoundView(const sim::World& live, const net::SnapshotRing& history,
   }
   if (shooter_rec == nullptr) return false;
 
+  // SessionTable::joinOrGet hands out the lowest free id, so after a leave,
+  // an id's history entries may describe a previous, different occupant.
+  // Sampling a bracket that predates the current occupant's session would
+  // place the new player at the old player's position -- and credit a hit
+  // on the new player for a shot at a ghost. The bracket samplePlayerAt
+  // would use is the same for every target (it depends only on view_tick),
+  // so it is computed once here rather than per player.
+  const sim::WorldSnapshot* bracket = history.newestAtOrBefore(req.view_tick);
+
   sim::WorldSnapshot result{};
   result.tick = req.view_tick;
   uint32_t written = 0;
@@ -37,6 +46,7 @@ bool buildRewoundView(const sim::World& live, const net::SnapshotRing& history,
   for (uint32_t i = 0; i < live_snap.count; ++i) {
     const sim::PlayerState& p = live_snap.players[i];
     if (p.id == req.shooter) continue;
+    if (bracket == nullptr || bracket->tick <= sessions.joinedTick(p.id)) continue;
     float x = 0.0f, y = 0.0f;
     if (!net::samplePlayerAt(history, p.id, req.view_tick, x, y)) continue;
     sim::PlayerState rewound = p;
