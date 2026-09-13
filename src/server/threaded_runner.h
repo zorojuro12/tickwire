@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <thread>
+#include <utility>
 
 #include "net/transport.h"
 #include "server/jitter_stats.h"
@@ -35,15 +37,21 @@ class ThreadedRunner {
   // sim_load_us: synthetic per-tick busy-wait, applied via clock_ns() (never
   // a direct wall-clock read, so this stays testable under an injected
   // clock) after each tick() call. Zero -- the default -- costs nothing.
+  // batch: selects Server::ingestBatch() (recvmmsg) over ingest() on the I/O
+  // thread, for transports that support it -- ignored (never even
+  // considered) for one that doesn't, via the same if constexpr fork
+  // nativeHandle() already uses.
   ThreadedRunner(Server<T, Ring>& srv, T& transport, uint32_t tick_hz,
                  std::function<uint64_t()> clock_ns,
-                 std::function<uint32_t()> clock_ms, uint32_t sim_load_us = 0) noexcept
+                 std::function<uint32_t()> clock_ms, uint32_t sim_load_us = 0,
+                 bool batch = false) noexcept
       : srv_(srv),
         transport_(transport),
         tick_hz_(tick_hz),
         clock_ns_(std::move(clock_ns)),
         clock_ms_(std::move(clock_ms)),
-        sim_load_us_(sim_load_us) {}
+        sim_load_us_(sim_load_us),
+        batch_(batch) {}
 
   bool run(uint32_t ticks_limit) noexcept {
     TickTimer timer(tick_hz_);
@@ -101,7 +109,7 @@ class ThreadedRunner {
       std::array<uint32_t, 4> ready{};
       while (!stop_.load(std::memory_order_relaxed)) {
         const size_t n = poll.wait(50, ready);
-        for (size_t i = 0; i < n; ++i) packets_ingested_ += srv_.ingest();
+        for (size_t i = 0; i < n; ++i) packets_ingested_ += ingestOnce();
       }
     } else {
       // LoopbackTransport has no pollable fd -- drain in a yield loop.
@@ -112,12 +120,20 @@ class ThreadedRunner {
     }
   }
 
+  size_t ingestOnce() noexcept {
+    if constexpr (requires { transport_.receiveBatch(std::declval<std::span<net::PacketSlot>>()); }) {
+      if (batch_) return srv_.ingestBatch();
+    }
+    return srv_.ingest();
+  }
+
   Server<T, Ring>& srv_;
   T& transport_;
   uint32_t tick_hz_;
   std::function<uint64_t()> clock_ns_;
   std::function<uint32_t()> clock_ms_;
   uint32_t sim_load_us_;
+  bool batch_;
 
   std::atomic<bool> stop_{false};
   uint32_t ticks_run_ = 0;

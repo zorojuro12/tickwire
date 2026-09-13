@@ -117,6 +117,9 @@ add_test(NAME server_app_threads2_spsc COMMAND tw_server --port 0 --ticks 5 --th
 set_tests_properties(server_app_threads2_spsc PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=spsc")
 add_test(NAME server_app_threads2_mutex COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring mutex)
 set_tests_properties(server_app_threads2_mutex PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=mutex")
+add_test(NAME server_app_batch_ingest
+  COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring spsc --batch-ingest)
+set_tests_properties(server_app_batch_ingest PROPERTIES PASS_REGULAR_EXPRESSION "batch_ingest=1")
 add_test(NAME server_app_sim_load
   COMMAND tw_server --port 0 --ticks 20 --threads 2 --ring spsc --sim-load-us 20000)
 # CMake's built-in regex engine has no {n} bounded-repetition support, so the

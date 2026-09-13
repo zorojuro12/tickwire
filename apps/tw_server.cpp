@@ -33,13 +33,14 @@ void printUsage() {
   std::fprintf(
       stderr,
       "usage: tw_server [--port <n>] [--ticks <n>] [--threads <1|2>] [--ring <spsc|mutex>]\n"
-      "                 [--sim-load-us <n>]\n"
+      "                 [--sim-load-us <n>] [--batch-ingest]\n"
       "  --port <n>          bind port; 0 for an ephemeral port (default 41234)\n"
       "  --ticks <n>         stop after n ticks; 0 to run forever (default 0)\n"
       "  --threads <1|2>     1: single-threaded epoll loop (default). 2: split\n"
       "                      ingest and tick across two threads\n"
       "  --ring <spsc|mutex> ring arm for --threads 2 (default spsc)\n"
-      "  --sim-load-us <n>   synthetic per-tick busy-wait, microseconds (default 0)\n");
+      "  --sim-load-us <n>   synthetic per-tick busy-wait, microseconds (default 0)\n"
+      "  --batch-ingest      use recvmmsg batching on the I/O thread (--threads 2 only)\n");
 }
 
 // Runs the two-thread path on an explicitly named ring type, polling the
@@ -47,12 +48,14 @@ void printUsage() {
 // free while the runner's own sim loop runs on a background thread) and
 // forwarding it to the runner via the signal-safe requestStop().
 template <typename Ring>
-uint32_t runThreaded(net::UdpTransport& transport, uint32_t ticks_limit, uint32_t sim_load_us) {
+uint32_t runThreaded(net::UdpTransport& transport, uint32_t ticks_limit, uint32_t sim_load_us,
+                      bool batch_ingest) {
   auto srv = std::make_unique<server::Server<net::UdpTransport, Ring>>(transport);
   const uint32_t effective_limit =
       ticks_limit == 0 ? std::numeric_limits<uint32_t>::max() : ticks_limit;
   server::ThreadedRunner<net::UdpTransport, Ring> runner(
-      *srv, transport, sim::kTickHz, &server::monotonicNs, &server::monotonicMs, sim_load_us);
+      *srv, transport, sim::kTickHz, &server::monotonicNs, &server::monotonicMs, sim_load_us,
+      batch_ingest);
 
   std::atomic<bool> done{false};
   std::thread t([&] {
@@ -90,6 +93,7 @@ int main(int argc, char** argv) {
   int threads = 1;
   std::string ring = "spsc";
   uint32_t sim_load_us = 0;
+  bool batch_ingest = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -111,6 +115,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--sim-load-us" && i + 1 < argc) {
       sim_load_us = static_cast<uint32_t>(std::atoi(argv[++i]));
+    } else if (arg == "--batch-ingest") {
+      batch_ingest = true;
     } else {
       printUsage();
       return 1;
@@ -125,19 +131,17 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf("port=%u\n", ntohs(transport->localEndpoint().port_be));
-  std::printf("threads=%d ring=%s sim_load_us=%u\n", threads,
-               threads == 2 ? ring.c_str() : "none", sim_load_us);
+  std::printf("threads=%d ring=%s sim_load_us=%u batch_ingest=%d\n", threads,
+               threads == 2 ? ring.c_str() : "none", sim_load_us, batch_ingest ? 1 : 0);
   std::fflush(stdout);
 
   if (threads == 2) {
     if (ring == "mutex") {
-      runThreaded<server::MutexRing<net::PacketSlot, server::kIngestCapacity>>(*transport,
-                                                                                ticks_limit,
-                                                                                sim_load_us);
+      runThreaded<server::MutexRing<net::PacketSlot, server::kIngestCapacity>>(
+          *transport, ticks_limit, sim_load_us, batch_ingest);
     } else {
-      runThreaded<server::SpscRing<net::PacketSlot, server::kIngestCapacity>>(*transport,
-                                                                               ticks_limit,
-                                                                               sim_load_us);
+      runThreaded<server::SpscRing<net::PacketSlot, server::kIngestCapacity>>(
+          *transport, ticks_limit, sim_load_us, batch_ingest);
     }
     std::fflush(stdout);
     return 0;

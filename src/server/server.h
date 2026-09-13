@@ -50,6 +50,30 @@ class Server {
     return accepted;
   }
 
+  // Batched receive via the transport's receiveBatch() (recvmmsg), for
+  // transports that support it. Only ever called for such a T -- never
+  // instantiated for one that doesn't, the same way ingest()'s callers never
+  // reach a transport without tryReceive(). A batch landing after the ring
+  // has filled is dropped past that point (counted once, matching ingest()'s
+  // own single-overflow accounting), not requeued.
+  size_t ingestBatch() noexcept {
+    constexpr size_t kBatchSize = 32;
+    std::array<net::PacketSlot, kBatchSize> staging{};
+    const size_t filled = transport_.receiveBatch(std::span<net::PacketSlot>(staging));
+    size_t accepted = 0;
+    for (size_t i = 0; i < filled; ++i) {
+      net::PacketSlot* slot = ring_.acquireWrite();
+      if (slot == nullptr) {
+        ++ingest_overflows_;
+        break;
+      }
+      *slot = staging[i];
+      ring_.commitWrite();
+      ++accepted;
+    }
+    return accepted;
+  }
+
   // Drains the ring, consumes one input per live session at the tick this
   // call is about to simulate, steps the world, broadcasts on schedule.
   void tick(uint32_t now_ms) noexcept {
