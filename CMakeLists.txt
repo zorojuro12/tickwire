@@ -148,6 +148,14 @@ set_tests_properties(bench_queue_spsc PROPERTIES PASS_REGULAR_EXPRESSION "ns_per
 add_test(NAME bench_queue_mutex COMMAND bench_queue --ring mutex --items 10000 --rate 0)
 set_tests_properties(bench_queue_mutex PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
 
+add_test(NAME bench_smoke
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/bench.sh" --smoke
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# No PASS_REGULAR_EXPRESSION, per the same reasoning as e2e_udp: that
+# property replaces the exit code as CTest's sole pass/fail signal once set,
+# which would mask a set -e failure inside the script. Exit code alone is the
+# signal here.
+
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)
 
