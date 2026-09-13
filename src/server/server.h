@@ -12,6 +12,7 @@
 #include "net/transport.h"
 #include "server/input_buffer.h"
 #include "server/packet_ring.h"
+#include "server/rewind.h"
 #include "server/session.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -19,6 +20,11 @@
 namespace server {
 
 inline constexpr uint32_t kSnapshotIntervalTicks = 3;  // 60 Hz sim -> 20 Hz snapshots
+// Pins Task 4's kMaxRewindTicks derivation: it assumes a view tick no more
+// than kMaxRewindTicks behind is always at or after history_'s oldest entry.
+// A future change to either constant that breaks this must fail loudly here,
+// not silently let the server sample a different bracket than the client did.
+static_assert(kMaxRewindTicks <= (net::kSnapshotRingSlots - 1) * kSnapshotIntervalTicks);
 inline constexpr size_t kIngestCapacity = 256;         // power of two, per PacketRing
 
 template <net::Transport T, typename Ring = PacketRing<net::PacketSlot, kIngestCapacity>>
@@ -107,13 +113,27 @@ class Server {
     // Pass 2: resolve every fire only after every session's input for this
     // tick has been applied -- so a hit never depends on session iteration
     // order (the shooter's fire resolving against the target's stale
-    // pre-input position).
+    // pre-input position). Ray-tests against the shooter's rewound view when
+    // one is requested and plausible; the shooter itself is never rewound
+    // (its own live position is exactly what it drew -- P3 predicts it
+    // exactly), only other players are sampled from history_.
     for (size_t i = 0; i < fire_count; ++i) {
       const sim::InputCommand& in = fire_candidates[i];
-      if (sessions_.tryFire(in.player_id, next) &&
-          world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y).has_value()) {
-        ++hits_[in.player_id - 1];
+      if (!sessions_.tryFire(in.player_id, next)) continue;
+      ++shots_[in.player_id - 1];
+
+      std::optional<uint32_t> target;
+      sim::WorldSnapshot rewound{};
+      if (in.view_tick != 0 &&
+          buildRewoundView(world_, history_, sessions_,
+                            {in.player_id, in.view_tick, next}, rewound)) {
+        ++rewound_shots_;
+        target = sim::resolveHitscan(rewound, in.player_id, in.aim_x, in.aim_y);
+      } else {
+        if (in.view_tick != 0) ++rewinds_rejected_;
+        target = world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y);
       }
+      if (target.has_value()) ++hits_[in.player_id - 1];
     }
 
     world_.step();
@@ -144,6 +164,12 @@ class Server {
     if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
     return hits_[player_id - 1];
   }
+  uint64_t shots(uint32_t player_id) const noexcept {
+    if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
+    return shots_[player_id - 1];
+  }
+  uint64_t rewoundShots() const noexcept { return rewound_shots_; }
+  uint64_t rewindsRejected() const noexcept { return rewinds_rejected_; }
   uint64_t droppedPackets() const noexcept { return dropped_; }
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
   uint64_t inputUnderruns() const noexcept { return input_underruns_; }
@@ -359,6 +385,9 @@ class Server {
   std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
   net::SnapshotRing history_;
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
+  std::array<uint64_t, sim::kMaxPlayers> shots_{};
+  uint64_t rewound_shots_ = 0;
+  uint64_t rewinds_rejected_ = 0;
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;
   uint64_t input_underruns_ = 0;
