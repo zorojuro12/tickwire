@@ -3,8 +3,20 @@
 namespace server {
 
 bool buildRewoundView(const sim::World& live, const net::SnapshotRing& history,
-                      const SessionTable& /*sessions*/, const RewindRequest& req,
+                      const SessionTable& sessions, const RewindRequest& req,
                       sim::WorldSnapshot& out) noexcept {
+  // view_tick == 0 means "uncompensated" -- never a real rewind request.
+  if (req.view_tick == 0) return false;
+  // A view tick not strictly before the fire tick claims to have drawn a
+  // world that did not exist yet when the shot was fired.
+  if (req.view_tick >= req.fire_tick) return false;
+  // Cannot underflow: the check above already guarantees fire_tick > view_tick.
+  if (req.fire_tick - req.view_tick > kMaxRewindTicks) return false;
+  // The shooter claims to have drawn a snapshot it never acknowledged
+  // holding -- ackedSnapshotTick(shooter) is 0 for an unknown player, which
+  // view_tick > 0 already exceeds.
+  if (req.view_tick > sessions.ackedSnapshotTick(req.shooter)) return false;
+
   sim::WorldSnapshot live_snap{};
   live.writeSnapshot(live_snap);
 

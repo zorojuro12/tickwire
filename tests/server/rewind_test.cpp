@@ -82,5 +82,27 @@ TEST(RewindTest, PlacesTargetsAtTheSampledPositionAndTheShooterLive) {
   EXPECT_EQ(findById(out, 3), nullptr);
 }
 
+TEST(RewindTest, RefusesImplausibleViewTicks) {
+  Fixture f;
+
+  auto refused = [&](const RewindRequest& req) {
+    sim::WorldSnapshot out{};
+    out.tick = 0xDEADBEEFu;
+    const bool ok = buildRewoundView(*f.live, *f.history, *f.sessions, req, out);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(out.tick, 0xDEADBEEFu);
+  };
+
+  refused({.shooter = 1, .view_tick = 0, .fire_tick = 100});
+  refused({.shooter = 1, .view_tick = 94, .fire_tick = 100});
+  refused({.shooter = 1, .view_tick = 93, .fire_tick = 139});
+  refused({.shooter = 1, .view_tick = 93, .fire_tick = 93});
+  refused({.shooter = 7, .view_tick = 91, .fire_tick = 100});
+
+  sim::WorldSnapshot out{};
+  const RewindRequest boundary{.shooter = 1, .view_tick = 93, .fire_tick = 138};
+  EXPECT_TRUE(buildRewoundView(*f.live, *f.history, *f.sessions, boundary, out));
+}
+
 }  // namespace
 }  // namespace server
