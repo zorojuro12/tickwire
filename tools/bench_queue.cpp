@@ -61,7 +61,14 @@ void runBench(const std::string& ring_name, uint64_t items, uint64_t rate) {
     uint64_t stamp = 0;
     std::memcpy(&stamp, slot->data.data(), sizeof(stamp));
     const uint64_t now_ns = server::monotonicNs();
-    stats->record(now_ns - stamp);
+    // The stamp and this read happen on different threads (and, in
+    // practice, different cores). CLOCK_MONOTONIC's monotonicity guarantee
+    // is per-thread; observed on this environment, cross-core reads can
+    // show a sub-microsecond apparent inversion, which unsigned subtraction
+    // would wrap to a huge, benchmark-poisoning value. Clamp to zero rather
+    // than let clock noise dominate every percentile.
+    const int64_t delta_ns = static_cast<int64_t>(now_ns) - static_cast<int64_t>(stamp);
+    stats->record(delta_ns > 0 ? static_cast<uint64_t>(delta_ns) : 0);
     ++observed;
     ring->commitRead();
   }
