@@ -1192,4 +1192,48 @@ bidirectional traffic to a `ThreadedRunner`-driven `LoopbackTransport` test,
 but not attacker-reachable (production always uses `UdpTransport`) and no
 current test exercises it concurrently — noted, not fixed.
 
-<!-- Next entries: P5 writeup, finishing-a-development-branch -->
+---
+
+## P6 — Lag compensation
+
+**Pivot — the wire format reopens a second time, deliberately, to protocol
+version 3: `InputCommand` gains `view_tick` (25 → 29 bytes).** Decided while
+writing the P6 plan (2026-09-12), before any code, and put to the user
+explicitly rather than made quietly — the standard this doc's P2 section set.
+Server-side rewind needs one fact only the client has: *which tick's world it
+drew* when it fired. P3 and P4 each found that a header field P1 had reserved
+already carried what they needed; P6 is the first phase where no existing field
+does. Three options were weighed:
+
+- **Derive it server-side** as `ack_tick − kInterpDelayTicks` — no wire change.
+  Rejected: the client's render tick runs 0–2+ ticks ahead of that estimate
+  between snapshots (plus `Interpolator`'s ±1 nudges), up to ~0.27 units at
+  `kMoveSpeed` against a 0.5 hit radius — edge shots would register wrong, which
+  is precisely the "hit registered at the wrong position" failure the design doc
+  names as P6's. It also makes the demo's toggle a server flag needing a restart
+  per comparison.
+- **Smuggle it into the header's `seq` field**, unused on `Input` packets —
+  exact, zero bytes, no version bump. Rejected: it gives the reliable-channel
+  sequence field an unrelated second meaning. P4's `ack_tick` precedent does not
+  transfer — that field's second meaning was the *same* concept ("highest tick
+  seen from the peer") in the other direction; a rewind tick in `seq` is not.
+- **Protocol v3 — chosen.** Exact, honest, and `view_tick = 0` doubles as the
+  client-side "uncompensated" toggle. Contained to one plan task (Task 1), which
+  re-freezes the format in the same commits, exactly as P2's amendment was.
+  `MsgType::kHitConfirm = 7` lands in the same task via the additive path P2's
+  hit-feedback decision reserved for it.
+
+Not added, deliberately: the session-token scheme P2's security review named as a
+candidate for "any future phase that changes the wire format again." It was
+considered at this reopening and left out — a session-authentication redesign is
+its own scope, and folding it into lag compensation would make neither reviewable.
+Recorded so the omission reads as a decision, not an oversight.
+
+**Decision — rewind reproduces what the client *drew*, not where the target
+*was*.** See the P6 plan's Self-Review ("Exact reproduction over per-tick
+history") for the full reasoning; the plan's Task 3 makes it structural by moving
+`Interpolator::sample`'s logic into `net::samplePlayerAt`, which both the client's
+render path and the server's rewind call.
+
+<!-- Next entries: P6 execution findings, security review, measured hit rates -->
+<!-- (P5 writeup and finishing-a-development-branch are recorded above.) -->
