@@ -83,9 +83,8 @@ Every packet on the wire starts with this header.
 | 22 | 2 | `ack_seq` | reliable channel ack — **populated at P2**, echoed by the server on `JoinAccept`/`Leave` replies to the request's `seq`; zero elsewhere |
 
 `MsgType`: `kInvalid = 0, kInput = 1, kSnapshot = 2, kJoinRequest = 3,
-kJoinAccept = 4, kLeave = 5, kSnapshotDelta = 6`. `kMaxMsgType = 6`. Values
-`7..255` are unused; P6's hit-feedback message can take `7`, added
-additively without touching the header or bumping the version again.
+kJoinAccept = 4, kLeave = 5, kSnapshotDelta = 6, kHitConfirm = 7`.
+`kMaxMsgType = 7`. Values `8..255` are unused.
 
 **Every header field is now both populated and consumed.** P2 stamped every
 field but only fully consumed `seq`/`ack_seq` (the join/leave channel — what
@@ -198,6 +197,23 @@ true if that constant ever changes.
 - A player unchanged since the baseline (all five fields compare `==`) costs
   zero bytes: no bit in `changed_mask`, no record.
 
+## `HitConfirm` payload — 8 bytes
+
+`MsgType::kHitConfirm`'s payload — **added at P6**. Sent server → shooter
+only, never broadcast, in reply to a fire that resolved a hit (compensated or
+not). Not a reliable channel: at most one per hit, no retransmit or ack.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | `target_id` — the player hit; never `0` (`kInvalidPlayerId` is rejected on both the encode and decode side) |
+| 4 | 4 | `fire_tick` — echoes the `InputCommand::tick` of the shot that hit |
+
+The header's own `tick` on this packet is the *server's* tick the hit
+resolved on (i.e. `Server::tick()`'s current tick when pass 2 ran), not
+`fire_tick` — the two differ whenever the shot was buffered before being
+consumed, the same tick-vs-buffering distinction every other message type
+already draws.
+
 ## Maximum packet size
 
 ```
@@ -256,6 +272,9 @@ Every decoder rejects malformed input rather than normalizing it:
   `docs/project-history.md`'s P2 security review section.
 - A `JoinAccept` carrying `player_id == 0` (`kInvalidPlayerId`) — rejected on
   both the encode and decode side; `0` never travels as an accepted id.
+- **`HitConfirm` (added at P6):** the same `target_id == 0` rejection as
+  `JoinAccept`, on both the encode and decode side, and the same strict
+  8-byte framing rule as every other fixed-size payload.
 - **`SnapshotDelta` (added at P4):** a `changed_mask` bit not present in
   `present_mask` — rejected (a record for a player simultaneously claimed
   absent is incoherent). A payload whose length disagrees with

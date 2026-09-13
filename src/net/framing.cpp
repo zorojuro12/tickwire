@@ -19,6 +19,24 @@ bool decodeJoinAccept(ByteReader& r, uint32_t& out) {
   return true;
 }
 
+bool encodeHitConfirm(const HitConfirm& in, ByteWriter& w) {
+  if (in.target_id == sim::kInvalidPlayerId) return false;
+  w.u32(in.target_id);
+  w.u32(in.fire_tick);
+  return w.ok();
+}
+
+bool decodeHitConfirm(ByteReader& r, HitConfirm& out) {
+  if (r.remaining() != kHitConfirmBytes) return false;
+  HitConfirm h{};
+  h.target_id = r.u32();
+  h.fire_tick = r.u32();
+  if (!r.ok()) return false;
+  if (h.target_id == sim::kInvalidPlayerId) return false;
+  out = h;
+  return true;
+}
+
 size_t framePacket(PacketHeader h, std::span<const std::byte> payload,
                     std::span<std::byte> out) {
   if (payload.size() > kMaxPacket - kHeaderBytes) return 0;

@@ -21,8 +21,9 @@ enum class MsgType : uint8_t {
   kJoinAccept = 4,
   kLeave = 5,
   kSnapshotDelta = 6,
+  kHitConfirm = 7,
 };
-inline constexpr uint8_t kMaxMsgType = 6;
+inline constexpr uint8_t kMaxMsgType = 7;
 
 struct PacketHeader {
   uint32_t magic = kProtocolMagic;

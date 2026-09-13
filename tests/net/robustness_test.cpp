@@ -227,11 +227,14 @@ TEST(RobustnessTest, RandomByteBuffersNeverCrashADecoder) {
   // kMaxMsgType from 5 to 6 -- `1 + rng() % kMaxMsgType` draws a different
   // value and shifts every subsequent draw, so the type distribution this
   // sweep depends on changes with the message-type count. Re-searched
-  // against the actual decoders after that change; seed 2 reliably produces
-  // a hit again. Recorded per docs/project-history.md P1/P2/P4 findings,
-  // same escape hatch the plan authorizes for Task 6 Checkpoint 4's
-  // jitter-inversion seed: a fixed seed is for reproducibility, not sacred.
-  std::mt19937_64 rng{2u};
+  // against the actual decoders after that change; seed 2 reliably produced
+  // a hit again through P5. P6 widened InputCommand to 53 bytes and
+  // kMaxMsgType to 7 (view_tick, kHitConfirm) and seed 2 stopped hitting
+  // again; re-searched upward, seed 1 reliably hits. Recorded per
+  // docs/project-history.md P1/P2/P4/P6 findings, same escape hatch the plan
+  // authorizes for Task 6 Checkpoint 4's jitter-inversion seed: a fixed seed
+  // is for reproducibility, not sacred.
+  std::mt19937_64 rng{1u};
   bool reached_payload_decoder = false;
   bool any_payload_decoded = false;
 

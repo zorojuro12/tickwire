@@ -82,7 +82,7 @@ TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
       mutated(4, 0x02),  // wrong version (a rejected-outright v2 header)
       mutated(4, 0x04),  // wrong version (not yet a real version)
       mutated(5, 0x00),  // MsgType::kInvalid
-      mutated(5, 0x07),  // one past kMaxMsgType
+      mutated(5, 0x08),  // one past kMaxMsgType
       mutated(5, 0xFF),
   };
 
@@ -162,7 +162,6 @@ TEST(ProtocolHeaderTest, RejectsPayloadLenThatDisagreesWithThePacket) {
 
 TEST(ProtocolTest, HeaderAcceptsSnapshotDeltaType) {
   EXPECT_EQ(static_cast<uint8_t>(MsgType::kSnapshotDelta), 6);
-  EXPECT_EQ(kMaxMsgType, 6);
 
   PacketHeader h = goldenHeader();
   h.type = MsgType::kSnapshotDelta;
@@ -176,14 +175,32 @@ TEST(ProtocolTest, HeaderAcceptsSnapshotDeltaType) {
   PacketHeader out;
   ASSERT_TRUE(decodeHeader(r, out));
   EXPECT_EQ(out.type, MsgType::kSnapshotDelta);
+}
 
-  std::array<std::byte, kHeaderBytes> raw_type_7 = kGoldenHeaderBytes;
-  raw_type_7[5] = std::byte{0x07};
-  raw_type_7[6] = std::byte{0x00};  // payload_len low byte
-  raw_type_7[7] = std::byte{0x00};  // payload_len high byte
-  ByteReader r7(raw_type_7);
-  PacketHeader out7;
-  EXPECT_FALSE(decodeHeader(r7, out7));
+TEST(ProtocolTest, HeaderAcceptsHitConfirmType) {
+  EXPECT_EQ(static_cast<uint8_t>(MsgType::kHitConfirm), 7);
+  EXPECT_EQ(kMaxMsgType, 7);
+
+  PacketHeader h = goldenHeader();
+  h.type = MsgType::kHitConfirm;
+  h.payload_len = 0;
+
+  std::array<std::byte, kHeaderBytes> buf{};
+  ByteWriter w(buf);
+  ASSERT_TRUE(encodeHeader(h, w));
+
+  ByteReader r(buf);
+  PacketHeader out;
+  ASSERT_TRUE(decodeHeader(r, out));
+  EXPECT_EQ(out.type, MsgType::kHitConfirm);
+
+  std::array<std::byte, kHeaderBytes> raw_type_8 = kGoldenHeaderBytes;
+  raw_type_8[5] = std::byte{0x08};
+  raw_type_8[6] = std::byte{0x00};  // payload_len low byte
+  raw_type_8[7] = std::byte{0x00};  // payload_len high byte
+  ByteReader r8(raw_type_8);
+  PacketHeader out8;
+  EXPECT_FALSE(decodeHeader(r8, out8));
 }
 
 TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
