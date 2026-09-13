@@ -34,5 +34,19 @@ TEST(JitterStatsTest, EmptyRecorderReturnsZero) {
   EXPECT_EQ(stats.maxNs(), 0u);
 }
 
+TEST(JitterStatsTest, SamplesPastCapacityAreDroppedAndCountedNeverOverwritten) {
+  JitterStats<4> stats;
+  stats.record(10);
+  stats.record(20);
+  stats.record(30);
+  stats.record(40);
+  stats.record(999);
+  stats.record(999);
+
+  EXPECT_EQ(stats.count(), 4u);
+  EXPECT_EQ(stats.dropped(), 2u);
+  EXPECT_EQ(stats.maxNs(), 40u);
+}
+
 }  // namespace
 }  // namespace server
