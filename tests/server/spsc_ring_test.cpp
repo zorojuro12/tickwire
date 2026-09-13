@@ -47,5 +47,10 @@ TEST(SpscRingTest, CommittedWriteBecomesReadableInOrder) {
   EXPECT_NE(ring.acquireWrite(), nullptr);
 }
 
+TEST(SpscRingTest, IndexCacheLineSeparationIsReal) {
+  SpscRing<uint32_t, 4> ring;
+  EXPECT_GE(ring.indexByteSeparation(), 64u);
+}
+
 }  // namespace
 }  // namespace server
