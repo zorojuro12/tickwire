@@ -138,6 +138,13 @@ add_test(NAME e2e_udp
 # (set -e/pipefail in the script, plus tw_loadclient's own
 # joined==players return value) is the pass/fail signal here.
 
+add_executable(bench_queue tools/bench_queue.cpp)
+target_link_libraries(bench_queue PRIVATE libserver)
+add_test(NAME bench_queue_spsc COMMAND bench_queue --ring spsc --items 10000 --rate 0)
+set_tests_properties(bench_queue_spsc PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+add_test(NAME bench_queue_mutex COMMAND bench_queue --ring mutex --items 10000 --rate 0)
+set_tests_properties(bench_queue_mutex PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)
 
