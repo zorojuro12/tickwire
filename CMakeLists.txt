@@ -111,6 +111,8 @@ add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
 set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
 add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
 set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+add_test(NAME server_app_threads1 COMMAND tw_server --port 0 --ticks 5 --threads 1)
+set_tests_properties(server_app_threads1 PROPERTIES PASS_REGULAR_EXPRESSION "threads=1")
 
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)

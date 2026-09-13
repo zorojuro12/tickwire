@@ -23,10 +23,16 @@ volatile std::sig_atomic_t g_stop = 0;
 void handleSigint(int) { g_stop = 1; }
 
 void printUsage() {
-  std::fprintf(stderr,
-                "usage: tw_server [--port <n>] [--ticks <n>]\n"
-                "  --port <n>   bind port; 0 for an ephemeral port (default 41234)\n"
-                "  --ticks <n>  stop after n ticks; 0 to run forever (default 0)\n");
+  std::fprintf(
+      stderr,
+      "usage: tw_server [--port <n>] [--ticks <n>] [--threads <1|2>] [--ring <spsc|mutex>]\n"
+      "                 [--sim-load-us <n>]\n"
+      "  --port <n>          bind port; 0 for an ephemeral port (default 41234)\n"
+      "  --ticks <n>         stop after n ticks; 0 to run forever (default 0)\n"
+      "  --threads <1|2>     1: single-threaded epoll loop (default). 2: split\n"
+      "                      ingest and tick across two threads\n"
+      "  --ring <spsc|mutex> ring arm for --threads 2 (default spsc)\n"
+      "  --sim-load-us <n>   synthetic per-tick busy-wait, microseconds (default 0)\n");
 }
 
 }  // namespace
@@ -34,6 +40,9 @@ void printUsage() {
 int main(int argc, char** argv) {
   uint16_t port = 41234;
   uint32_t ticks_limit = 0;
+  int threads = 1;
+  std::string ring = "spsc";
+  uint32_t sim_load_us = 0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -41,6 +50,20 @@ int main(int argc, char** argv) {
       port = static_cast<uint16_t>(std::atoi(argv[++i]));
     } else if (arg == "--ticks" && i + 1 < argc) {
       ticks_limit = static_cast<uint32_t>(std::atoi(argv[++i]));
+    } else if (arg == "--threads" && i + 1 < argc) {
+      threads = std::atoi(argv[++i]);
+      if (threads != 1 && threads != 2) {
+        printUsage();
+        return 1;
+      }
+    } else if (arg == "--ring" && i + 1 < argc) {
+      ring = argv[++i];
+      if (ring != "spsc" && ring != "mutex") {
+        printUsage();
+        return 1;
+      }
+    } else if (arg == "--sim-load-us" && i + 1 < argc) {
+      sim_load_us = static_cast<uint32_t>(std::atoi(argv[++i]));
     } else {
       printUsage();
       return 1;
@@ -55,6 +78,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf("port=%u\n", ntohs(transport->localEndpoint().port_be));
+  std::printf("threads=%d ring=%s sim_load_us=%u\n", threads,
+               threads == 2 ? ring.c_str() : "none", sim_load_us);
   std::fflush(stdout);
 
   auto srv = std::make_unique<server::Server<net::UdpTransport>>(*transport);
