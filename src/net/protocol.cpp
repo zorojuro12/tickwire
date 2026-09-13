@@ -49,6 +49,7 @@ bool encodeInput(const sim::InputCommand& in, ByteWriter& w) {
   w.f32(in.aim_x);
   w.f32(in.aim_y);
   w.u8(in.fire ? 1 : 0);
+  w.u32(in.view_tick);
   return w.ok();
 }
 
@@ -63,6 +64,10 @@ bool decodeInput(ByteReader& r, sim::InputCommand& out) {
   in.aim_x = r.f32();
   in.aim_y = r.f32();
   in.fire = r.u8() != 0;
+  // Not range-checked here: plausibility depends on session state (how far
+  // behind the shooter's acknowledged snapshot, how far behind the fire
+  // tick), which only the server can judge (server::buildRewoundView).
+  in.view_tick = r.u32();
 
   if (!r.ok()) return false;
   if (!std::isfinite(in.move_x) || !std::isfinite(in.move_y)) return false;

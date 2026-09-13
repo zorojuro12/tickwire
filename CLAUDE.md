@@ -137,11 +137,11 @@ by hand.
 
 - **No `std::format`** — GCC 10 lacks it. Use fmtlib if formatting is needed.
 
-## Wire protocol (frozen at P1, amended once at P2)
+## Wire protocol (frozen at P1, amended at P2 and P6)
 
-- **The format is at version 2** (`kProtocolVersion = 2`) —
+- **The format is at version 3** (`kProtocolVersion = 3`) —
   [`docs/wire-format.md`](docs/wire-format.md) is authoritative and current;
-  a version-1 header is rejected outright, no cross-version compatibility.
+  a version-2 header is rejected outright, no cross-version compatibility.
 - **Protocol fields are explicitly little-endian**, encoded/decoded byte by
   byte through `net::ByteWriter`/`net::ByteReader` — never `memcpy` a struct
   onto the wire, never `reinterpret_cast` a buffer to a struct. `_be`

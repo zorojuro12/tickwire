@@ -10,7 +10,7 @@ namespace {
 
 constexpr std::array<std::byte, kHeaderBytes> kGoldenHeaderBytes = {
     std::byte{0x54}, std::byte{0x57}, std::byte{0x49}, std::byte{0x52},
-    std::byte{0x02}, std::byte{0x01}, std::byte{0x04}, std::byte{0x00},
+    std::byte{0x03}, std::byte{0x01}, std::byte{0x04}, std::byte{0x00},
     std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
     std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
     std::byte{0xB0}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
@@ -77,9 +77,10 @@ TEST(ProtocolHeaderTest, RejectsUnknownMagicVersionOrType) {
     return bytes;
   };
 
-  const std::array<std::array<std::byte, kHeaderBytes>, 5> cases = {
+  const std::array<std::array<std::byte, kHeaderBytes>, 6> cases = {
       mutated(0, 0x55),  // wrong magic
-      mutated(4, 0x03),  // wrong version
+      mutated(4, 0x02),  // wrong version (a rejected-outright v2 header)
+      mutated(4, 0x04),  // wrong version (not yet a real version)
       mutated(5, 0x00),  // MsgType::kInvalid
       mutated(5, 0x07),  // one past kMaxMsgType
       mutated(5, 0xFF),
@@ -192,7 +193,8 @@ TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
                               .move_y = -0.5f,
                               .aim_x = 0.0f,
                               .aim_y = 1.0f,
-                              .fire = true};
+                              .fire = true,
+                              .view_tick = 1210};
 
   std::array<std::byte, kInputBytes> buf{};
   ByteWriter w(buf);
@@ -206,7 +208,8 @@ TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-      std::byte{0x01}};
+      std::byte{0x01},
+      std::byte{0xBA}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}};
   EXPECT_EQ(buf, expected);
 
   ByteReader r(buf);
@@ -224,6 +227,7 @@ TEST(InputCommandCodecTest, EncodesToExactBytesAndDecodesBack) {
   EXPECT_EQ(bitsOf(out.aim_x), bitsOf(in.aim_x));
   EXPECT_EQ(bitsOf(out.aim_y), bitsOf(in.aim_y));
   EXPECT_EQ(out.fire, in.fire);
+  EXPECT_EQ(out.view_tick, in.view_tick);
 }
 
 TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
@@ -234,7 +238,8 @@ TEST(InputCommandCodecTest, FireIsLenientToAnyNonzeroByte) {
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-      std::byte{0x00}};
+      std::byte{0x00},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
   {
     ByteReader r(buf);
@@ -260,8 +265,12 @@ TEST(InputCommandCodecTest, RejectsFramingMismatch) {
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-      std::byte{0x01}};
+      std::byte{0x01},
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
+  // The prefix sweep below rejects every length shorter than kInputBytes
+  // (29), including 25 — the v2 wire size — and the overlong case just after
+  // it rejects 30 (kInputBytes + 1).
   for (size_t prefix = 0; prefix < kInputBytes; ++prefix) {
     ByteReader r(std::span<const std::byte>(golden).subspan(0, prefix));
     sim::InputCommand out{};
@@ -458,7 +467,8 @@ TEST(InputCommandCodecTest, RejectsNonFiniteFloats) {
         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
         std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-        std::byte{0x01}};
+        std::byte{0x01},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
     bytes[offset + 0] = bits[0];
     bytes[offset + 1] = bits[1];
     bytes[offset + 2] = bits[2];

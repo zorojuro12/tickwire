@@ -20,7 +20,8 @@ constexpr std::array<std::byte, kInputBytes> kGoldenInputPayload = {
     std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
     std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
     std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-    std::byte{0x01}};
+    std::byte{0x01},
+    std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
 TEST(JoinAcceptCodecTest, EncodesToExactBytesAndDecodesBack) {
   std::array<std::byte, kJoinAcceptBytes> buf{};
@@ -88,7 +89,7 @@ TEST(FramePacketTest, BuildsAWholeDatagramWithACorrectPayloadLen) {
 
   const std::array<std::byte, kHeaderBytes> expected_header = {
       std::byte{0x54}, std::byte{0x57}, std::byte{0x49}, std::byte{0x52},
-      std::byte{0x02}, std::byte{0x01}, std::byte{0x19}, std::byte{0x00},
+      std::byte{0x03}, std::byte{0x01}, std::byte{0x1D}, std::byte{0x00},
       std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
       std::byte{0xB0}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
