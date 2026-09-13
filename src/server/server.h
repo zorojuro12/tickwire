@@ -133,7 +133,10 @@ class Server {
         if (in.view_tick != 0) ++rewinds_rejected_;
         target = world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y);
       }
-      if (target.has_value()) ++hits_[in.player_id - 1];
+      if (target.has_value()) {
+        ++hits_[in.player_id - 1];
+        sendHitConfirm(in.player_id, *target, in.tick, next, now_ms);
+      }
     }
 
     world_.step();
@@ -298,6 +301,28 @@ class Server {
     out_h.tick = world_.tick() + 1;
     out_h.send_time_ms = now_ms;
     out_h.ack_seq = ack_seq;
+    sendFramed(to, out_h, payload);
+  }
+
+  // Notifies the shooter only -- never broadcast, never sent to the target.
+  void sendHitConfirm(uint32_t shooter, uint32_t target, uint32_t fire_tick, uint32_t tick,
+                       uint32_t now_ms) noexcept {
+    net::Endpoint to;
+    if (!sessions_.endpointFor(shooter, to)) {
+      ++dropped_;
+      return;
+    }
+    const net::HitConfirm hc{.target_id = target, .fire_tick = fire_tick};
+    std::array<std::byte, net::kHitConfirmBytes> payload{};
+    net::ByteWriter pw(payload);
+    if (!net::encodeHitConfirm(hc, pw)) {
+      ++dropped_;
+      return;
+    }
+    net::PacketHeader out_h;
+    out_h.type = net::MsgType::kHitConfirm;
+    out_h.tick = tick;
+    out_h.send_time_ms = now_ms;
     sendFramed(to, out_h, payload);
   }
 

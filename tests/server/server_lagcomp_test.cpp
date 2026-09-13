@@ -148,5 +148,45 @@ TEST(ServerLagCompTest, CompensatedShotHitsWhereTheTargetWasDrawn) {
   }
 }
 
+TEST(ServerLagCompTest, HitIsConfirmedToTheShooterOnly) {
+  {
+    MovingTargetScenario s;
+    s.tp->clearSent();
+    s.fire(s.b9x, s.b9y, /*ack_tick=*/30, /*view_tick=*/9);
+
+    size_t hit_confirms = 0;
+    for (size_t i = 0; i < s.tp->sentCount(); ++i) {
+      const RecordingTransport::Sent& sent = s.tp->sentAt(i);
+      net::ByteReader r(std::span<const std::byte>(sent.data).subspan(0, sent.len));
+      net::PacketHeader h;
+      ASSERT_TRUE(net::decodeHeader(r, h));
+      if (h.type != net::MsgType::kHitConfirm) continue;
+      ++hit_confirms;
+      EXPECT_EQ(sent.to, kEpA);
+      EXPECT_EQ(h.tick, 33u);
+      net::HitConfirm hc{};
+      ASSERT_TRUE(net::decodeHitConfirm(r, hc));
+      EXPECT_EQ(hc.target_id, 2u);
+      EXPECT_EQ(hc.fire_tick, 33u);
+    }
+    EXPECT_EQ(hit_confirms, 1u);
+  }
+  {
+    MovingTargetScenario s;
+    s.tp->clearSent();
+    s.fire(s.b9x, s.b9y, /*ack_tick=*/30, /*view_tick=*/0);
+
+    size_t hit_confirms = 0;
+    for (size_t i = 0; i < s.tp->sentCount(); ++i) {
+      const RecordingTransport::Sent& sent = s.tp->sentAt(i);
+      net::ByteReader r(std::span<const std::byte>(sent.data).subspan(0, sent.len));
+      net::PacketHeader h;
+      ASSERT_TRUE(net::decodeHeader(r, h));
+      if (h.type == net::MsgType::kHitConfirm) ++hit_confirms;
+    }
+    EXPECT_EQ(hit_confirms, 0u);
+  }
+}
+
 }  // namespace
 }  // namespace server
