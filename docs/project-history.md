@@ -1233,7 +1233,47 @@ Recorded so the omission reads as a decision, not an oversight.
 *was*.** See the P6 plan's Self-Review ("Exact reproduction over per-tick
 history") for the full reasoning; the plan's Task 3 makes it structural by moving
 `Interpolator::sample`'s logic into `net::samplePlayerAt`, which both the client's
-render path and the server's rewind call.
+render path and the server's rewind call. The residual gap this accepts: if a
+client itself lost or dropped the bracketing snapshot (under loss or
+reordering), it lerped across a wider gap than the server's ring can
+reproduce — Task 7's jitter exercises exactly this, and the measured hit rate
+below already reflects it.
+
+**Decision — `kMaxRewindTicks = 45` is derived from the server's own ring
+geometry, not chosen by feel.** When pass 2 of tick `F` runs, `history_`
+(`net::kSnapshotRingSlots` = 16 snapshots, `kSnapshotIntervalTicks` = 3 apart)
+holds a newest entry at a tick `>= F - 3` and an oldest entry at a tick
+`>= F - 48` (at most `F - 46`). A view tick no more than 45 behind `F` is
+therefore always at or after the ring's oldest entry, so the bracketing
+snapshot the client sampled is guaranteed still present — beyond that, the
+server could silently sample a *different* bracket than the client did, which
+would break the exact-reproduction property above, so it refuses instead. A
+`static_assert` beside `kSnapshotIntervalTicks` in `server.h` pins this
+derivation so a future change to either constant fails to compile rather than
+silently invalidating it. Expected real depth at the 200 ms demo was
+estimated at ~24 ticks (lead 3 + RTT ~12 + snapshot wait ≤3 + interpolation
+delay 6) before any code existed; Task 7 measured exactly 24.
+
+**Decision — a refused rewind falls back to resolving against the live
+world, exactly like an uncompensated shot, rather than voiding the shot.**
+This is the least surprising outcome for an honest player whose request
+happened to be implausible (clock hiccup, a snapshot aged out of the ring),
+and it hands an attacker nothing beyond what turning compensation off
+already gives them for free — confirmed explicitly by the Task 9 security
+review (see below).
+
+**Decision — a rewound target is excluded, not substituted, when its id was
+reused since the sampled bracket.** `SessionTable::joinOrGet` hands out the
+lowest free id, so after a leave, that id's history entries can describe a
+*different*, earlier occupant. Sampling such a bracket would place the new
+occupant at the old one's position and credit a hit on a ghost. Fixed by
+recording `SessionTable::Entry::joined_tick` (assigned explicitly on every new
+session, per the pre-existing convention that a field without an explicit
+assignment in `joinOrGet` silently relies on `removeAt`'s implicit tail-slot
+reset) and skipping a target in `buildRewoundView` whenever the sampling
+bracket's own tick is at or before that occupant's `joined_tick`. Folds in
+P3's own open note that `hits_` was never reset on id reuse (`shots_` gets
+the identical treatment, since it's new this phase with the same indexing).
 
 **Measured hit rate, Task 7 (`lagcomp_hitrate_test`, 100 ms one-way latency +
 10 ms jitter each direction, 200 ms round trip, real `UdpTransport`, seed 7):**
