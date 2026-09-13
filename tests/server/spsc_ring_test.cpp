@@ -1,6 +1,8 @@
 #include "server/spsc_ring.h"
 
 #include <cstdint>
+#include <memory>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -50,6 +52,43 @@ TEST(SpscRingTest, CommittedWriteBecomesReadableInOrder) {
 TEST(SpscRingTest, IndexCacheLineSeparationIsReal) {
   SpscRing<uint32_t, 4> ring;
   EXPECT_GE(ring.indexByteSeparation(), 64u);
+}
+
+TEST(SpscRingTest, ItemsCrossARealThreadBoundaryInOrderWithNoGapsOrDuplicates) {
+  constexpr uint64_t kItems = 100000;
+  auto ring = std::make_unique<SpscRing<uint64_t, 64>>();
+
+  std::thread producer([&ring] {
+    for (uint64_t v = 1; v <= kItems; ++v) {
+      uint64_t* slot;
+      while ((slot = ring->acquireWrite()) == nullptr) std::this_thread::yield();
+      *slot = v;
+      ring->commitWrite();
+    }
+  });
+
+  uint64_t prev = 0;
+  uint64_t observed = 0;
+  std::thread consumer([&] {
+    while (observed < kItems) {
+      uint64_t* slot = ring->acquireRead();
+      if (slot == nullptr) {
+        std::this_thread::yield();
+        continue;
+      }
+      const uint64_t v = *slot;
+      EXPECT_EQ(v, prev + 1);
+      prev = v;
+      ++observed;
+      ring->commitRead();
+    }
+  });
+
+  producer.join();
+  consumer.join();
+
+  EXPECT_EQ(observed, kItems);
+  EXPECT_EQ(ring->size(), 0u);
 }
 
 }  // namespace
