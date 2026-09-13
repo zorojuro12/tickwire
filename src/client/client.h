@@ -158,6 +158,12 @@ class Client {
 
   const PredictionStats& predictionError() const noexcept { return stats_; }
 
+  // HUD-only state: nothing here feeds prediction, clock sync, or anything
+  // sent -- a confirmed hit is purely a fact this client is told about.
+  uint32_t hitsConfirmed() const noexcept { return hits_confirmed_; }
+  uint32_t lastHitTarget() const noexcept { return last_hit_target_; }
+  uint32_t lastHitFireTick() const noexcept { return last_hit_fire_tick_; }
+
   // The local player's position: predicted when prediction is on and the
   // prediction world has been seeded, otherwise straight from the newest
   // snapshot. False when no snapshot has yet carried this player.
@@ -254,9 +260,21 @@ class Client {
       case net::MsgType::kSnapshotDelta:
         handleSnapshotDelta(r, h, now_ms);
         break;
+      case net::MsgType::kHitConfirm:
+        handleHitConfirm(r);
+        break;
       default:
         break;
     }
+  }
+
+  void handleHitConfirm(net::ByteReader& r) noexcept {
+    if (state_ != State::kJoined) return;
+    net::HitConfirm hc{};
+    if (!net::decodeHitConfirm(r, hc)) return;
+    ++hits_confirmed_;
+    last_hit_target_ = hc.target_id;
+    last_hit_fire_tick_ = hc.fire_tick;
   }
 
   void handleJoinAccept(net::ByteReader& r, const net::PacketHeader& h, uint32_t now_ms) noexcept {
@@ -447,6 +465,9 @@ class Client {
   Interpolator interp_;
   bool interpolation_enabled_ = true;
   bool lag_compensation_enabled_ = true;
+  uint32_t hits_confirmed_ = 0;
+  uint32_t last_hit_target_ = 0;
+  uint32_t last_hit_fire_tick_ = 0;
 };
 
 }  // namespace client

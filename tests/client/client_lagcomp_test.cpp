@@ -51,6 +51,33 @@ void injectSnapshot(RecordingTransport& tp, uint32_t tick, uint32_t send_time_ms
   tp.inject(kServerEp, std::span<const std::byte>(buf).subspan(0, written));
 }
 
+void injectHitConfirm(RecordingTransport& tp, const net::Endpoint& from, uint32_t target_id,
+                       uint32_t fire_tick) {
+  const net::HitConfirm hc{.target_id = target_id, .fire_tick = fire_tick};
+  std::array<std::byte, net::kHitConfirmBytes> payload{};
+  net::ByteWriter pw(payload);
+  ASSERT_TRUE(net::encodeHitConfirm(hc, pw));
+  net::PacketHeader h;
+  h.type = net::MsgType::kHitConfirm;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
+// Injects a kHitConfirm whose payload is exactly `payload`, bypassing
+// encodeHitConfirm's own validation -- for exercising the decoder's own
+// rejection paths (a target_id == 0 payload, a wrong-length payload).
+void injectRawHitConfirm(RecordingTransport& tp, const net::Endpoint& from,
+                          std::span<const std::byte> payload) {
+  net::PacketHeader h;
+  h.type = net::MsgType::kHitConfirm;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, payload, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
 void lastSentInput(const RecordingTransport& tp, sim::InputCommand& out) {
   ASSERT_GT(tp.sentCount(), 0u);
   const RecordingTransport::Sent& s = tp.sentAt(tp.sentCount() - 1);
@@ -127,6 +154,45 @@ TEST(ClientLagCompTest, InputCarriesTheTickTheClientDrew) {
   sim::InputCommand in2{};
   lastSentInput(*tp2, in2);
   EXPECT_EQ(in2.view_tick, 0u);
+}
+
+TEST(ClientLagCompTest, CountsHitConfirmationsFromTheServerOnly) {
+  constexpr net::Endpoint kOtherEp{0x7F000001u, 0x3999u};
+
+  auto tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> c(*tp, kServerEp);
+  c.beginJoin(0);
+  injectJoinAccept(*tp, 1, kJoinSeq, 0);
+  c.tick(16);
+
+  injectHitConfirm(*tp, kServerEp, 2, 777);
+  c.tick(32);
+  EXPECT_EQ(c.hitsConfirmed(), 1u);
+  EXPECT_EQ(c.lastHitTarget(), 2u);
+  EXPECT_EQ(c.lastHitFireTick(), 777u);
+
+  injectHitConfirm(*tp, kOtherEp, 5, 900);
+  c.tick(48);
+  EXPECT_EQ(c.hitsConfirmed(), 1u);
+  EXPECT_EQ(c.lastHitTarget(), 2u);
+  EXPECT_EQ(c.lastHitFireTick(), 777u);
+
+  const std::array<std::byte, net::kHitConfirmBytes> zero_target = {
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}};
+  injectRawHitConfirm(*tp, kServerEp, zero_target);
+  const std::array<std::byte, net::kHitConfirmBytes - 1> too_short{};
+  injectRawHitConfirm(*tp, kServerEp, too_short);
+  c.tick(64);
+  EXPECT_EQ(c.hitsConfirmed(), 1u);
+  EXPECT_EQ(c.lastHitTarget(), 2u);
+  EXPECT_EQ(c.lastHitFireTick(), 777u);
+
+  auto idle_tp = std::make_unique<RecordingTransport>();
+  Client<RecordingTransport> idle(*idle_tp, kServerEp);
+  injectHitConfirm(*idle_tp, kServerEp, 3, 100);
+  idle.tick(16);
+  EXPECT_EQ(idle.hitsConfirmed(), 0u);
 }
 
 }  // namespace
