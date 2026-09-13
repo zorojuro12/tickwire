@@ -34,6 +34,8 @@ TEST(ThreadedRunnerTest, DrivesAFullJoinTickCycleAcrossTwoThreads) {
   EXPECT_TRUE(runner.run(30));
   EXPECT_EQ(runner.ticksRun(), 30u);
   EXPECT_EQ(srv->worldTick(), 30u);
+  EXPECT_EQ(runner.jitter().count(), 29u);
+  EXPECT_EQ(runner.jitter().maxNs(), 16'666'667u);
 }
 
 TEST(ThreadedRunnerTest, APacketSentFromThePeerReachesTheWorldAcrossTheSeam) {
