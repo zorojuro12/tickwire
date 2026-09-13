@@ -32,14 +32,18 @@ namespace server {
 template <net::Transport T, typename Ring, size_t JitterSamples = 65536>
 class ThreadedRunner {
  public:
+  // sim_load_us: synthetic per-tick busy-wait, applied via clock_ns() (never
+  // a direct wall-clock read, so this stays testable under an injected
+  // clock) after each tick() call. Zero -- the default -- costs nothing.
   ThreadedRunner(Server<T, Ring>& srv, T& transport, uint32_t tick_hz,
                  std::function<uint64_t()> clock_ns,
-                 std::function<uint32_t()> clock_ms) noexcept
+                 std::function<uint32_t()> clock_ms, uint32_t sim_load_us = 0) noexcept
       : srv_(srv),
         transport_(transport),
         tick_hz_(tick_hz),
         clock_ns_(std::move(clock_ns)),
-        clock_ms_(std::move(clock_ms)) {}
+        clock_ms_(std::move(clock_ms)),
+        sim_load_us_(sim_load_us) {}
 
   bool run(uint32_t ticks_limit) noexcept {
     TickTimer timer(tick_hz_);
@@ -56,7 +60,7 @@ class ThreadedRunner {
 
     uint64_t prev_ns = 0;
     bool have_prev = false;
-    while (ticks_run_ < ticks_limit) {
+    while (ticks_run_ < ticks_limit && !stop_.load(std::memory_order_relaxed)) {
       const size_t n = sim_poll.wait(50, ready);
       for (size_t i = 0; i < n && ticks_run_ < ticks_limit; ++i) {
         if (ready[i] != 1) continue;
@@ -69,6 +73,11 @@ class ThreadedRunner {
           srv_.tick(clock_ms_());
           ++ticks_run_;
           --expirations;
+          if (sim_load_us_ > 0) {
+            const uint64_t deadline_ns = clock_ns_() + static_cast<uint64_t>(sim_load_us_) * 1000ull;
+            while (clock_ns_() < deadline_ns) {
+            }
+          }
         }
       }
     }
@@ -108,6 +117,7 @@ class ThreadedRunner {
   uint32_t tick_hz_;
   std::function<uint64_t()> clock_ns_;
   std::function<uint32_t()> clock_ms_;
+  uint32_t sim_load_us_;
 
   std::atomic<bool> stop_{false};
   uint32_t ticks_run_ = 0;

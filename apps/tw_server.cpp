@@ -2,18 +2,25 @@
 #include <netinet/in.h>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "net/udp.h"
 #include "server/clock.h"
+#include "server/mutex_ring.h"
 #include "server/poll_set.h"
 #include "server/server.h"
+#include "server/spsc_ring.h"
+#include "server/threaded_runner.h"
 #include "server/tick_timer.h"
 #include "sim/sim.h"
 
@@ -33,6 +40,46 @@ void printUsage() {
       "                      ingest and tick across two threads\n"
       "  --ring <spsc|mutex> ring arm for --threads 2 (default spsc)\n"
       "  --sim-load-us <n>   synthetic per-tick busy-wait, microseconds (default 0)\n");
+}
+
+// Runs the two-thread path on an explicitly named ring type, polling the
+// SIGINT-set g_stop flag from this thread (the calling thread is otherwise
+// free while the runner's own sim loop runs on a background thread) and
+// forwarding it to the runner via the signal-safe requestStop().
+template <typename Ring>
+uint32_t runThreaded(net::UdpTransport& transport, uint32_t ticks_limit, uint32_t sim_load_us) {
+  auto srv = std::make_unique<server::Server<net::UdpTransport, Ring>>(transport);
+  const uint32_t effective_limit =
+      ticks_limit == 0 ? std::numeric_limits<uint32_t>::max() : ticks_limit;
+  server::ThreadedRunner<net::UdpTransport, Ring> runner(
+      *srv, transport, sim::kTickHz, &server::monotonicNs, &server::monotonicMs, sim_load_us);
+
+  std::atomic<bool> done{false};
+  std::thread t([&] {
+    runner.run(effective_limit);
+    done.store(true, std::memory_order_relaxed);
+  });
+  while (!done.load(std::memory_order_relaxed)) {
+    if (g_stop != 0) runner.requestStop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  t.join();
+
+  std::printf("ticks=%u\n", runner.ticksRun());
+  std::printf("snapshot_bytes=%llu full_equiv_bytes=%llu deltas=%llu keyframes=%llu\n",
+              static_cast<unsigned long long>(srv->snapshotBytesSent()),
+              static_cast<unsigned long long>(srv->snapshotBytesFullEquivalent()),
+              static_cast<unsigned long long>(srv->deltasSent()),
+              static_cast<unsigned long long>(srv->keyframesSent()));
+  std::printf("jitter_ns p50=%llu p99=%llu max=%llu samples=%zu dropped=%zu\n",
+              static_cast<unsigned long long>(runner.jitter().percentileNs(0.50)),
+              static_cast<unsigned long long>(runner.jitter().percentileNs(0.99)),
+              static_cast<unsigned long long>(runner.jitter().maxNs()), runner.jitter().count(),
+              runner.jitter().dropped());
+  std::printf("packets_ingested=%llu ingest_overflows=%llu\n",
+              static_cast<unsigned long long>(runner.packetsIngested()),
+              static_cast<unsigned long long>(srv->ingestOverflows()));
+  return runner.ticksRun();
 }
 
 }  // namespace
@@ -81,6 +128,20 @@ int main(int argc, char** argv) {
   std::printf("threads=%d ring=%s sim_load_us=%u\n", threads,
                threads == 2 ? ring.c_str() : "none", sim_load_us);
   std::fflush(stdout);
+
+  if (threads == 2) {
+    if (ring == "mutex") {
+      runThreaded<server::MutexRing<net::PacketSlot, server::kIngestCapacity>>(*transport,
+                                                                                ticks_limit,
+                                                                                sim_load_us);
+    } else {
+      runThreaded<server::SpscRing<net::PacketSlot, server::kIngestCapacity>>(*transport,
+                                                                               ticks_limit,
+                                                                               sim_load_us);
+    }
+    std::fflush(stdout);
+    return 0;
+  }
 
   auto srv = std::make_unique<server::Server<net::UdpTransport>>(*transport);
 
