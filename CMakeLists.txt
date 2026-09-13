@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(tickwire CXX)
 
+find_package(Threads REQUIRED)
+
 include(FetchContent)
 FetchContent_Declare(googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
@@ -27,7 +29,7 @@ add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing
 target_link_libraries(libnet PUBLIC libsim)
 
 add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp)
-target_link_libraries(libserver PUBLIC libnet)
+target_link_libraries(libserver PUBLIC libnet Threads::Threads)
 
 add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp src/client/interpolation.cpp)
 target_include_directories(libclient PUBLIC src)
@@ -65,6 +67,7 @@ tw_add_test(input_buffer_test tests/server/input_buffer_test.cpp)
 tw_add_test(server_test tests/server/server_test.cpp)
 tw_add_test(timer_test tests/server/timer_test.cpp)
 tw_add_test(jitter_stats_test tests/server/jitter_stats_test.cpp)
+tw_add_test(mutex_ring_test tests/server/mutex_ring_test.cpp)
 tw_add_test(client_test tests/client/client_test.cpp)
 tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
 tw_add_test(prediction_test tests/client/prediction_test.cpp)
