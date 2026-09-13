@@ -28,4 +28,13 @@ class SnapshotRing {
   size_t next_ = 0;
 };
 
+// Where player_id was at tick, bracketed between the two snapshots in ring
+// nearest tick -- the same rule client::Interpolator::sample renders with,
+// shared so the server's rewind (server::buildRewoundView) computes the
+// identical answer over its own history_ ring. False when player_id cannot
+// be placed at tick (absent from every usable bracket, or the ring is
+// empty); x/y are left untouched on false.
+bool samplePlayerAt(const SnapshotRing& ring, uint32_t player_id, uint32_t tick, float& x,
+                     float& y) noexcept;
+
 }  // namespace net
