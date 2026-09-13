@@ -403,6 +403,31 @@ TEST(WorldTest, HitscanDistanceTiesResolveToTheLowerPlayerId) {
   }
 }
 
+TEST(WorldTest, HitscanOverASnapshotUsesOnlyTheSnapshotsPositions) {
+  WorldSnapshot view{};
+  view.tick = 0;
+  view.count = 5;
+  view.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+  view.players[1] = {.id = 2, .x = 5.0f, .y = 0.4f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+  view.players[2] = {.id = 3, .x = 3.0f, .y = -0.6f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+  view.players[3] = {.id = 4, .x = 5.0f, .y = -0.3f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+  view.players[4] = {.id = 5, .x = -4.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+
+  EXPECT_EQ(resolveHitscan(view, 1, 1.0f, 0.0f), 2u);
+  EXPECT_EQ(resolveHitscan(view, 1, -1.0f, 0.0f), 5u);
+  EXPECT_EQ(resolveHitscan(view, 1, 0.0f, 1.0f), std::nullopt);
+  EXPECT_EQ(resolveHitscan(view, 9, 1.0f, 0.0f), std::nullopt);
+  EXPECT_EQ(resolveHitscan(view, 1, 0.0f, 0.0f), std::nullopt);
+  EXPECT_EQ(resolveHitscan(view, 1, std::numeric_limits<float>::quiet_NaN(), 0.0f), std::nullopt);
+  EXPECT_EQ(resolveHitscan(view, 1, std::numeric_limits<float>::infinity(), 0.0f), std::nullopt);
+
+  WorldSnapshot only_shooter{};
+  only_shooter.tick = 0;
+  only_shooter.count = 1;
+  only_shooter.players[0] = {.id = 1, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = kPlayerRadius};
+  EXPECT_EQ(resolveHitscan(only_shooter, 1, 1.0f, 0.0f), std::nullopt);
+}
+
 TEST(WorldTest, SetPlayerStateOverwritesPositionAndVelocity) {
   auto w = std::make_unique<World>();
   ASSERT_TRUE(w->addPlayer(1, 0.0f, 0.0f));

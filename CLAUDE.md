@@ -17,7 +17,7 @@ changed or been discovered since.
 |---|---|
 | `src/sim/` | `libsim` — deterministic simulation core (`sim::World`) and POD payload types. No I/O, no wall-clock reads, no allocation. |
 | `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, framing (`net::framePacket`), and the `Transport` implementations (UDP, loopback, simulated). |
-| `src/server/` | `libserver` — `Server<T, Ring>`, `SessionTable` (endpoint↔player binding), the I/O↔sim seam (`PacketRing`, `MutexRing`, or the lock-free `SpscRing` — swappable via `Ring`), `ThreadedRunner` (splits I/O and simulation across two real threads over that seam), `JitterStats` (percentile recorder), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), and the monotonic clock (`monotonicMs`/`monotonicNs`). |
+| `src/server/` | `libserver` — `Server<T, Ring>`, `SessionTable` (endpoint↔player binding), the I/O↔sim seam (`PacketRing`, `MutexRing`, or the lock-free `SpscRing` — swappable via `Ring`), `ThreadedRunner` (splits I/O and simulation across two real threads over that seam), `JitterStats` (percentile recorder), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), the monotonic clock (`monotonicMs`/`monotonicNs`), and `rewind.{h,cpp}` (`server::buildRewoundView` — the world as a shooter's client actually drew it, for lag-compensated hit resolution). |
 | `src/client/` | `libclient` — `Client<T>` (join handshake, input send, snapshot store) and the pure world→screen view mapping used by the raylib renderer. |
 | `apps/` | Thin executables: `tw_server`, `tw_loadclient` (headless load client), `tw_client` (raylib demo client). Argument parsing, a clock, and a loop — no logic of their own. |
 | `scripts/` | `tw` (container invocation), `ci.sh`, `demo.sh`, `e2e-udp.sh`, toolchain/determinism verification scripts. |
@@ -71,6 +71,18 @@ plan execution, not assumed.
   section for the full reasoning and the security review that checked it
   against the real `UdpTransport` implementation rather than assuming the
   `Transport` concept guarantees it.
+- **A rewound target's position must come from the same sampling function the
+  client rendered with — never a server-side reimplementation.** Both
+  `client::Interpolator::sample` (render) and `server::buildRewoundView`
+  (lag-compensated hit resolution, P6) compute "where was player N at tick T"
+  by calling the single shared `net::samplePlayerAt`, over each side's own
+  `net::SnapshotRing`. Two independently-written implementations of this
+  question is exactly the divergence class `libsim` exists to close, and it
+  would silently break P6's central claim (a shot resolves against what the
+  shooter actually saw). Verified by `SnapshotRingTest.SamplePlayerAtFollowsTheInterpolationRules`
+  (the extracted function's own contract) and by the P6 Task 9 security
+  review, which confirmed via diff that `net::samplePlayerAt`'s body is
+  `client::Interpolator::sample`'s former body moved verbatim, not rewritten.
 
 ## Build and test
 
@@ -137,11 +149,11 @@ by hand.
 
 - **No `std::format`** — GCC 10 lacks it. Use fmtlib if formatting is needed.
 
-## Wire protocol (frozen at P1, amended once at P2)
+## Wire protocol (frozen at P1, amended at P2 and P6)
 
-- **The format is at version 2** (`kProtocolVersion = 2`) —
+- **The format is at version 3** (`kProtocolVersion = 3`) —
   [`docs/wire-format.md`](docs/wire-format.md) is authoritative and current;
-  a version-1 header is rejected outright, no cross-version compatibility.
+  a version-2 header is rejected outright, no cross-version compatibility.
 - **Protocol fields are explicitly little-endian**, encoded/decoded byte by
   byte through `net::ByteWriter`/`net::ByteReader` — never `memcpy` a struct
   onto the wire, never `reinterpret_cast` a buffer to a struct. `_be`

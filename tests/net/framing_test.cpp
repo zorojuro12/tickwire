@@ -20,7 +20,8 @@ constexpr std::array<std::byte, kInputBytes> kGoldenInputPayload = {
     std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xBF},
     std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
     std::byte{0x00}, std::byte{0x00}, std::byte{0x80}, std::byte{0x3F},
-    std::byte{0x01}};
+    std::byte{0x01},
+    std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
 TEST(JoinAcceptCodecTest, EncodesToExactBytesAndDecodesBack) {
   std::array<std::byte, kJoinAcceptBytes> buf{};
@@ -72,6 +73,66 @@ TEST(JoinAcceptCodecTest, RejectsInvalidPlayerIdOnBothSides) {
   EXPECT_EQ(out, 0xAAAAAAAAu);
 }
 
+TEST(HitConfirmCodecTest, EncodesToExactBytesAndDecodesBack) {
+  const HitConfirm in{.target_id = 2, .fire_tick = 1234};
+
+  std::array<std::byte, kHitConfirmBytes> buf{};
+  ByteWriter w(buf);
+  EXPECT_TRUE(encodeHitConfirm(in, w));
+  EXPECT_EQ(w.size(), kHitConfirmBytes);
+
+  const std::array<std::byte, kHitConfirmBytes> expected = {
+      std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}};
+  EXPECT_EQ(buf, expected);
+
+  ByteReader r(buf);
+  HitConfirm out{};
+  EXPECT_TRUE(decodeHitConfirm(r, out));
+  EXPECT_EQ(out.target_id, in.target_id);
+  EXPECT_EQ(out.fire_tick, in.fire_tick);
+}
+
+TEST(HitConfirmCodecTest, RejectsFramingMismatch) {
+  const std::array<std::byte, kHitConfirmBytes> golden = {
+      std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}};
+
+  {
+    ByteReader r(std::span<const std::byte>(golden).subspan(0, 7));
+    HitConfirm out{};
+    out.target_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHitConfirm(r, out));
+    EXPECT_EQ(out.target_id, 0xAAAAAAAAu);
+  }
+  {
+    std::array<std::byte, kHitConfirmBytes + 1> overlong{};
+    for (size_t i = 0; i < golden.size(); ++i) overlong[i] = golden[i];
+    overlong[kHitConfirmBytes] = std::byte{0xEE};
+    ByteReader r(overlong);
+    HitConfirm out{};
+    out.target_id = 0xAAAAAAAAu;
+    EXPECT_FALSE(decodeHitConfirm(r, out));
+    EXPECT_EQ(out.target_id, 0xAAAAAAAAu);
+  }
+}
+
+TEST(HitConfirmCodecTest, RejectsInvalidTargetIdOnBothSides) {
+  std::array<std::byte, kHitConfirmBytes> buf{};
+  ByteWriter w(buf);
+  EXPECT_FALSE(encodeHitConfirm(HitConfirm{.target_id = sim::kInvalidPlayerId, .fire_tick = 1234}, w));
+  EXPECT_EQ(w.size(), 0u);
+
+  const std::array<std::byte, kHitConfirmBytes> zero_target = {
+      std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+      std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00}};
+  ByteReader r(zero_target);
+  HitConfirm out{};
+  out.target_id = 0xAAAAAAAAu;
+  EXPECT_FALSE(decodeHitConfirm(r, out));
+  EXPECT_EQ(out.target_id, 0xAAAAAAAAu);
+}
+
 TEST(FramePacketTest, BuildsAWholeDatagramWithACorrectPayloadLen) {
   PacketHeader h;
   h.type = MsgType::kInput;
@@ -88,7 +149,7 @@ TEST(FramePacketTest, BuildsAWholeDatagramWithACorrectPayloadLen) {
 
   const std::array<std::byte, kHeaderBytes> expected_header = {
       std::byte{0x54}, std::byte{0x57}, std::byte{0x49}, std::byte{0x52},
-      std::byte{0x02}, std::byte{0x01}, std::byte{0x19}, std::byte{0x00},
+      std::byte{0x03}, std::byte{0x01}, std::byte{0x1D}, std::byte{0x00},
       std::byte{0xD2}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},
       std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
       std::byte{0xB0}, std::byte{0x04}, std::byte{0x00}, std::byte{0x00},

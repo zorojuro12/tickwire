@@ -1,5 +1,7 @@
 #include "net/snapshot_ring.h"
 
+#include <memory>
+
 #include <gtest/gtest.h>
 
 #include "sim/sim.h"
@@ -82,4 +84,72 @@ TEST(SnapshotRingTest, BracketsATickBetweenTwoSnapshots) {
   ASSERT_NE(ring.newestAtOrBefore(200), nullptr);
   EXPECT_EQ(ring.newestAtOrBefore(200)->tick, 106u);
   EXPECT_EQ(ring.oldestAfter(200), nullptr);
+}
+
+TEST(SnapshotRingTest, SamplePlayerAtFollowsTheInterpolationRules) {
+  auto ring = std::make_unique<net::SnapshotRing>();
+
+  sim::WorldSnapshot s100{};
+  s100.tick = 100;
+  s100.count = 2;
+  s100.players[0] = {.id = 2, .x = 0.0f, .y = 0.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  s100.players[1] = {.id = 4, .x = 7.0f, .y = 7.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  ring->store(s100);
+
+  sim::WorldSnapshot s104{};
+  s104.tick = 104;
+  s104.count = 2;
+  s104.players[0] = {.id = 2, .x = 10.0f, .y = -4.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  s104.players[1] = {.id = 3, .x = 20.0f, .y = 20.0f, .vx = 0.0f, .vy = 0.0f, .radius = sim::kPlayerRadius};
+  ring->store(s104);
+
+  auto sample = [&](uint32_t id, uint32_t tick, float& x, float& y) {
+    return net::samplePlayerAt(*ring, id, tick, x, y);
+  };
+
+  float x = -999.0f, y = -999.0f;
+  EXPECT_TRUE(sample(2, 102, x, y));
+  EXPECT_EQ(x, 5.0f);
+  EXPECT_EQ(y, -2.0f);
+
+  x = -999.0f, y = -999.0f;
+  EXPECT_TRUE(sample(2, 100, x, y));
+  EXPECT_EQ(x, 0.0f);
+  EXPECT_EQ(y, 0.0f);
+
+  x = -999.0f, y = -999.0f;
+  EXPECT_TRUE(sample(2, 110, x, y));
+  EXPECT_EQ(x, 10.0f);
+  EXPECT_EQ(y, -4.0f);
+
+  x = -999.0f, y = -999.0f;
+  EXPECT_TRUE(sample(2, 90, x, y));
+  EXPECT_EQ(x, 0.0f);
+  EXPECT_EQ(y, 0.0f);
+
+  x = -999.0f, y = -999.0f;
+  EXPECT_TRUE(sample(3, 102, x, y));
+  EXPECT_EQ(x, 20.0f);
+  EXPECT_EQ(y, 20.0f);
+
+  x = -111.0f, y = -111.0f;
+  EXPECT_FALSE(sample(4, 102, x, y));
+  EXPECT_EQ(x, -111.0f);
+  EXPECT_EQ(y, -111.0f);
+
+  x = -111.0f, y = -111.0f;
+  EXPECT_FALSE(sample(4, 110, x, y));
+  EXPECT_EQ(x, -111.0f);
+  EXPECT_EQ(y, -111.0f);
+
+  x = -111.0f, y = -111.0f;
+  EXPECT_FALSE(sample(9, 102, x, y));
+  EXPECT_EQ(x, -111.0f);
+  EXPECT_EQ(y, -111.0f);
+
+  auto empty = std::make_unique<net::SnapshotRing>();
+  x = -111.0f, y = -111.0f;
+  EXPECT_FALSE(net::samplePlayerAt(*empty, 2, 102, x, y));
+  EXPECT_EQ(x, -111.0f);
+  EXPECT_EQ(y, -111.0f);
 }

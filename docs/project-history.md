@@ -1233,7 +1233,216 @@ Recorded so the omission reads as a decision, not an oversight.
 *was*.** See the P6 plan's Self-Review ("Exact reproduction over per-tick
 history") for the full reasoning; the plan's Task 3 makes it structural by moving
 `Interpolator::sample`'s logic into `net::samplePlayerAt`, which both the client's
-render path and the server's rewind call.
+render path and the server's rewind call. The residual gap this accepts: if a
+client itself lost or dropped the bracketing snapshot (under loss or
+reordering), it lerped across a wider gap than the server's ring can
+reproduce — Task 7's jitter exercises exactly this, and the measured hit rate
+below already reflects it.
 
-<!-- Next entries: P6 execution findings, security review, measured hit rates -->
+**Decision — `kMaxRewindTicks = 45` is derived from the server's own ring
+geometry, not chosen by feel.** When pass 2 of tick `F` runs, `history_`
+(`net::kSnapshotRingSlots` = 16 snapshots, `kSnapshotIntervalTicks` = 3 apart)
+holds a newest entry at a tick `>= F - 3` and an oldest entry at a tick
+`>= F - 48` (at most `F - 46`). A view tick no more than 45 behind `F` is
+therefore always at or after the ring's oldest entry, so the bracketing
+snapshot the client sampled is guaranteed still present — beyond that, the
+server could silently sample a *different* bracket than the client did, which
+would break the exact-reproduction property above, so it refuses instead. A
+`static_assert` beside `kSnapshotIntervalTicks` in `server.h` pins this
+derivation so a future change to either constant fails to compile rather than
+silently invalidating it. Expected real depth at the 200 ms demo was
+estimated at ~24 ticks (lead 3 + RTT ~12 + snapshot wait ≤3 + interpolation
+delay 6) before any code existed; Task 7 measured exactly 24.
+
+**Decision — a refused rewind falls back to resolving against the live
+world, exactly like an uncompensated shot, rather than voiding the shot.**
+This is the least surprising outcome for an honest player whose request
+happened to be implausible (clock hiccup, a snapshot aged out of the ring),
+and it hands an attacker nothing beyond what turning compensation off
+already gives them for free — confirmed explicitly by the Task 9 security
+review (see below).
+
+**Decision — a rewound target is excluded, not substituted, when its id was
+reused since the sampled bracket.** `SessionTable::joinOrGet` hands out the
+lowest free id, so after a leave, that id's history entries can describe a
+*different*, earlier occupant. Sampling such a bracket would place the new
+occupant at the old one's position and credit a hit on a ghost. Fixed by
+recording `SessionTable::Entry::joined_tick` (assigned explicitly on every new
+session, per the pre-existing convention that a field without an explicit
+assignment in `joinOrGet` silently relies on `removeAt`'s implicit tail-slot
+reset) and skipping a target in `buildRewoundView` whenever the sampling
+bracket's own tick is at or before that occupant's `joined_tick`. Folds in
+P3's own open note that `hits_` was never reset on id reuse (`shots_` gets
+the identical treatment, since it's new this phase with the same indexing).
+
+**Measured hit rate, Task 7 (`lagcomp_hitrate_test`, 100 ms one-way latency +
+10 ms jitter each direction, 200 ms round trip, real `UdpTransport`, seed 7):**
+shots aimed at a target sweeping vertically past the shooter's row —
+
+```
+lagcomp=on  shots=75 hits=75 hit_rate=1.000 rewound=75 rejected=0 max_depth_ticks=24
+lagcomp=off shots=75 hits=8  hit_rate=0.107 rewound=0  rejected=0 max_depth_ticks=24
+```
+
+Compensated: every shot rewound (`rewound == shots`), none refused, 100% hit
+rate. Uncompensated: 10.7% hit rate, not 0% — the target's sweep reverses
+direction every 2 s, so a shot aimed at where it was drawn occasionally lands
+where the live target has since moved back to, exactly the residual the plan's
+Measurement Honesty constraint predicted rather than a discrepancy to explain
+away. Measured max rewind depth (24 ticks) lands almost exactly on Task 4's
+~24-tick estimate for the 200 ms demo (lead 3 + RTT ~12 + snapshot wait ≤3 +
+interpolation delay 6), comfortably inside `kMaxRewindTicks` (45) — this test
+passed on its first run, as the plan predicted for a measurement task once
+Tasks 1–6 were already correct.
+
+**Finding — no collateral test staleness this reopening, unlike P1/P2/P4's
+precedent, except one golden-vector test the plan didn't name.** Widening
+`kInputBytes` (25 → 29) and `kMaxMsgType` (6 → 7) has, in every prior wire
+reopening, shifted the `RandomByteBuffersNeverCrashADecoder` fuzz sweep's draw
+sequence enough to lose its one required payload-shaped hit; it did again here
+— seed 2 (in place since P4) stopped hitting, re-searched upward, seed 1
+reliably hits. Additionally, `tests/net/framing_test.cpp`'s
+`FramePacketTest.BuildsAWholeDatagramWithACorrectPayloadLen` golden-vector test
+was not named in Task 1's plan text (only `protocol_test.cpp`,
+`robustness_test.cpp`, and `framing_test.cpp`'s *new* `HitConfirmCodecTest`
+were), but it hardcodes the pre-v3 version byte (`0x02`) and payload length
+(`0x19` = 25) in its `expected_header` golden array — a collateral break caught
+immediately by the Checkpoint 1 verification run (`ctest -R
+'protocol_test|robustness_test|framing_test'` matched and ran it), not missed.
+Fixed in the same commit by updating the golden bytes to `0x03`/`0x1D` (29).
+
+### Task 9 boundary — mandatory security review findings
+
+Threat model (unchanged from P1–P5): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/server/rewind.{h,cpp}`, the P6
+diffs to `src/server/server.h`, `src/server/session.{h,cpp}`,
+`src/client/client.h`, `src/net/{protocol,framing,snapshot_ring}.{h,cpp}`,
+`src/sim/{sim.h,world.h,world.cpp}`, and `apps/tw_{server,client}.cpp`. **No
+CRITICAL or HIGH findings** — nothing required fixing before this phase could
+be considered done.
+
+**Verified closed — the attacker-chosen `view_tick` cannot escape its bounds,
+and a refused rewind grants nothing extra.** `buildRewoundView` rejects, in
+order, `view_tick == 0`, `view_tick >= fire_tick` (ordered first specifically
+so the next check's subtraction cannot underflow), `fire_tick - view_tick >
+kMaxRewindTicks`, and `view_tick > ackedSnapshotTick(shooter)`. `fire_tick` is
+always the server's own `next` tick, never client-supplied; `ackedSnapshotTick`
+is itself bounded to `<= world_.tick()` at record time
+(`handleInput`'s future-ack guard, P4), so `view_tick <= ackedSnapshotTick <=
+world_.tick() < fire_tick` always holds independent of the explicit check. A
+refused rewind falls through to exactly the same `world_.resolveHitscan(...)`
+call an uncompensated (`view_tick == 0`) shot takes — the residual "attacker
+picks the most favorable moment inside the legal window" is inherent to lag
+compensation (Valve's `sv_maxunlag` exists for the same reason) and is an
+accepted risk, not a defect.
+
+**Verified closed — rewind CPU cost is bounded and not attacker-amplifiable
+beyond the existing fire-rate cap.** `tryFire`'s `kFireCooldownTicks` gate runs
+*before* `buildRewoundView` is ever invoked, so a cooldown-violating request
+never reaches the rewind computation. Per call: one `writeSnapshot` (O(32)),
+one shooter lookup, one ring scan (O(16)), then up to 31 targets each costing a
+`joinedTick` lookup plus one `samplePlayerAt` call (~O(96)) — worst case (32
+sessions firing the same tick) is on the order of 10⁵ simple array-compare
+ops per tick, microseconds against a 16.67 ms budget. Bounded by the existing
+fixed `kMaxPlayers = 32` ceiling; P6 adds no new CPU-DoS surface beyond what
+firing already had.
+
+**Verified closed — `kHitConfirm` is single-send, shooter-only, and
+rate-bounded; quantified as a minor addendum to the P2 join/snapshot
+amplification finding, not a new one.** Sent at most once per resolved hit,
+gated by the same `tryFire` cooldown, resolved to the shooter's *own* bound
+endpoint via `endpointFor` — never the target's, never broadcast. 32 bytes on
+the wire (24 B header + 8 B payload). For an attacker who already holds a
+spoofed-source session (the P2 Finding 1 precondition), this adds at most
+≤160 B/s (≤5 pkts/sec) to that session's traffic — a sub-1x response/request
+byte ratio, unlike the up-to-~33x ratio the P2 amplification finding already
+records for `JoinRequest` → `Snapshot`. Recorded here as a quantified
+addendum to that existing deferred finding, not a new one and not a severity
+change.
+
+**Verified closed — id reuse cannot inherit a departed player's counts or
+rewind history.** Both removal sites (`handleLeave`, the timeout-expiry loop)
+reset `hits_`/`shots_`/`inputs_` for the freed id, matching the pattern
+`inputs_` already established at P3. `SessionTable::Entry::joined_tick` is
+assigned explicitly on every new session (`session.cpp`'s `joinOrGet`), not
+left to `removeAt`'s implicit tail-slot zeroing, per the pre-existing warning
+comment at that exact spot. For a same-tick leave-then-rejoin of the same id:
+packet routing fully drains before pass 1/pass 2 run and before `world_.tick()`
+advances, so a same-tick rejoin's `joined_tick` is stamped with the *current,
+pre-step* tick `F`; any legal `view_tick` a shooter can request already
+satisfies `view_tick <= ackedSnapshotTick(shooter) <= F`, so the bracket
+exclusion rule (`bracket->tick <= sessions.joinedTick(id)`) always trips for
+the reused id in this scenario too — not just the multi-tick-gap case Task 4
+Checkpoint 3's test exercises.
+
+**Verified closed — no new non-finite-float path.** `view_tick` is a
+`uint32_t`, not a float, so it carries no finiteness concern of its own.
+Rewound positions come only from the server's own already-validated `World`
+state and interpolation between two already-finite historical records (whose
+bracket denominator can never be zero, by `newestAtOrBefore`/`oldestAfter`'s
+strict-vs-inclusive split). `sim::resolveHitscan` receives only the
+already-validated `aim_x`/`aim_y` as attacker floats, on both the rewound and
+live-fallback paths.
+
+**Verified closed — no downgrade path.** `decodeHeader` rejects
+`version != kProtocolVersion` (3) before any payload decode reaches
+`route()`/`handlePacket()`; `decodeInput` requires exactly 29 bytes, so a
+25-byte (v2-shaped) payload is rejected regardless of header version.
+
+**Verified closed — a forged `kHitConfirm` cannot do more than move a client's
+own HUD counters.** The P3-established `slot.peer != server_` guard in
+`Client::handlePacket` runs before the type `switch`, covering `kHitConfirm`
+with no exception. A confirm forged from the server's own (already-assumed
+spoofable) address only updates `hits_confirmed_`/`last_hit_target_`/
+`last_hit_fire_tick_` — none of which feed `predicted_`, `clock_`, `pending_`,
+or anything the client sends.
+
+**Observed, not fixed — the P4 `Interpolator` id-reuse ghost is unaffected by
+P6 and remains a cosmetic-only residual.** `client::Interpolator` has no
+session-join awareness and is untouched by this phase's diff, so a client can
+still briefly lerp between two occupants of a reused id on screen. Server-side
+scoring is independently protected by `buildRewoundView`'s bracket-exclusion
+rule, which operates on server session/history state, not client rendering —
+the visual artifact cannot translate into a credited hit on the wrong
+occupant. Same disposition P4 gave it: recorded as observed, not a defect to
+fix here.
+
+**Re-verified — the three P2 CRITICAL findings, checked against this phase's
+actual diff rather than assumed.** Unlike P3 (which found `session.{h,cpp}`
+byte-for-byte unchanged), P6 *does* modify `session.h`/`session.cpp` — adding
+`joined_tick` and its accessor. Checked individually: **Finding 1**
+(spoofable session authorization) — `SessionTable::authorize()` is
+byte-for-byte unchanged, still pure endpoint-to-id binding; unaffected.
+**Finding 2** (join/snapshot amplification) — unaffected at the root, gains
+the quantified `kHitConfirm` addendum recorded above; no severity change.
+**Finding 3** (session-table exhaustion via id churn) — `joinOrGet`'s
+lowest-free-id assignment and the fixed 32-slot capacity are unchanged;
+`joined_tick` is inert metadata that touches neither capacity nor id
+selection; unaffected. All three stand exactly as P2 recorded, with Finding 2
+now carrying one quantified addendum.
+
+**Noted, not fixed (LOW, cpp-reviewer) — `buildRewoundView` makes three
+~800 B stack copies of a `WorldSnapshot`-shaped value** (`live_snap`,
+`result`, then `out = result`) where one write-through would do. Runs at most
+once per fire, already bounded by `kFireCooldownTicks` (≤5/sec/session) — the
+same "not worth optimizing ahead of a measurement" posture `broadcastSnapshot`
+already states for its own per-broadcast encode cost. Deferred, not fixed,
+consistent with that precedent.
+
+**Verified, no fix needed — every other question the plan raised.** The
+`aim_x`/`aim_y` unconditional zero-initialization in `apps/tw_client.cpp`
+means an unaimed shot from a not-yet-seeded local player is a degenerate
+no-op in `resolveHitscan`, not UB. `InputCommand::view_tick`'s default member
+initializer keeps the struct a trivially-copyable aggregate with no new
+constructors. The new `Server` counters (`shots_`, `rewound_shots_`,
+`rewinds_rejected_`) are written only inside `tick()`'s pass 2 and read only
+after `ThreadedRunner`'s sim thread joins — `threaded_runner.h` itself is
+untouched by this phase, so the P5-established two-thread ownership split
+needs no change. `net::samplePlayerAt`'s body was moved character-for-character
+out of `client::Interpolator::sample` (confirmed via diff), so no behavioral
+drift versus P4's original logic is possible.
+
+<!-- Next entries: Task 10 writeup, human-verified demo result. -->
 <!-- (P5 writeup and finishing-a-development-branch are recorded above.) -->

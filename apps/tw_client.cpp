@@ -75,6 +75,9 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
   SetTargetFPS(60);
 
   uint32_t latency_ms = cfg.latency_ms;
+  uint32_t last_hits_confirmed = 0;
+  int hit_flash_frames = 0;
+  constexpr int kHitFlashFrames = 12;
 
   while (!WindowShouldClose()) {
     const uint32_t now_ms = server::monotonicMs();
@@ -104,6 +107,9 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     if (IsKeyPressed(KEY_I)) {
       client->setInterpolationEnabled(!client->interpolationEnabled());
     }
+    if (IsKeyPressed(KEY_L)) {
+      client->setLagCompensationEnabled(!client->lagCompensationEnabled());
+    }
 
     const sim::WorldSnapshot& snap = client->latestSnapshot();
     float local_x = 0.0f, local_y = 0.0f;
@@ -119,6 +125,11 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
 
     const bool fire = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     client->sendInput(now_ms, move_x, move_y, aim_x, aim_y, fire);
+
+    if (client->hitsConfirmed() != last_hits_confirmed) {
+      last_hits_confirmed = client->hitsConfirmed();
+      hit_flash_frames = kHitFlashFrames;
+    }
 
     BeginDrawing();
     ClearBackground(BLACK);
@@ -151,12 +162,38 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
       DrawCircle(static_cast<int>(sp.x), static_cast<int>(sp.y), r, color);
     }
 
+    // While the fire button is held, trace the aim ray to the far side of
+    // the arena, so a shot that "looked like" a hit is visible as it happens.
+    if (have_local && fire) {
+      constexpr float kTracerLen = 4.0f * sim::kArenaHalf;
+      const client::ScreenPos sp0 = client::worldToScreen(local_x, local_y, kSide, 0.0f, 0.0f);
+      const client::ScreenPos sp1 = client::worldToScreen(
+          local_x + aim_x * kTracerLen, local_y + aim_y * kTracerLen, kSide, 0.0f, 0.0f);
+      DrawLine(static_cast<int>(sp0.x), static_cast<int>(sp0.y), static_cast<int>(sp1.x),
+                static_cast<int>(sp1.y), Fade(WHITE, 0.4f));
+    }
+
+    // A confirmed hit flashes a ring around the target's own drawn position
+    // for a dozen frames -- drawn from remotePosition, the same position the
+    // shooter's shot was resolved against.
+    if (hit_flash_frames > 0) {
+      float tx = 0.0f, ty = 0.0f;
+      if (client->remotePosition(client->lastHitTarget(), tx, ty)) {
+        const client::ScreenPos sp = client::worldToScreen(tx, ty, kSide, 0.0f, 0.0f);
+        const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide) * 1.6f;
+        DrawCircleLines(static_cast<int>(sp.x), static_cast<int>(sp.y), r, WHITE);
+      }
+      --hit_flash_frames;
+    }
+
     DrawText(TextFormat("tick=%u latency=%ums players=%u pred=%s rtt=%ums lead=%d err_p99=%.2f "
-                          "interp=%s render=%u",
+                          "interp=%s render=%u lagcomp=%s hits=%u",
                           client->latestSnapshotTick(), latency_ms, snap.count,
                           client->predictionEnabled() ? "on" : "off", client->rttMs(),
                           client->clockLead(), client->predictionError().p99(),
-                          client->interpolationEnabled() ? "on" : "off", client->renderTick()),
+                          client->interpolationEnabled() ? "on" : "off", client->renderTick(),
+                          client->lagCompensationEnabled() ? "on" : "off",
+                          client->hitsConfirmed()),
               10, 10, 20, RAYWHITE);
     EndDrawing();
   }

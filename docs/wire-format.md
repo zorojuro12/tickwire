@@ -1,11 +1,13 @@
-# Tickwire Wire Format (frozen at P1, amended once at P2)
+# Tickwire Wire Format (frozen at P1, amended at P2 and P6)
 
-The wire format was frozen at P1 and amended exactly once, at P2, to add an
-aim vector to `InputCommand` (see "Version history" below). This document
-describes the current (version 2) format; the golden byte vectors in
-[`tests/net/protocol_test.cpp`](../tests/net/protocol_test.cpp) **define**
-it — if this document and that test ever disagree, the test is right and
-this document has a bug.
+The wire format was frozen at P1 and has been amended twice: at P2, to add an
+aim vector to `InputCommand`, and at P6, to add a view tick to `InputCommand`
+and a hit-confirmation message type (see "Version history" below). This
+document describes the current (version 3) format; the golden byte vectors in
+[`tests/net/protocol_test.cpp`](../tests/net/protocol_test.cpp) and
+[`tests/net/framing_test.cpp`](../tests/net/framing_test.cpp) **define** it —
+if this document and those tests ever disagree, the tests are right and this
+document has a bug.
 
 ## Endianness
 
@@ -26,7 +28,7 @@ this area — the naming is the guard, not a convention to memorize.
 
 ```
 kProtocolMagic   = 0x52495754
-kProtocolVersion = 2
+kProtocolVersion = 3
 ```
 
 `0x52495754`'s little-endian bytes are `54 57 49 52`, which read as ASCII
@@ -54,6 +56,15 @@ kProtocolVersion = 2
   packets for the first time (previously always `0` in that direction) — see
   the header table and the new `SnapshotDelta` payload section below. See
   `docs/project-history.md`'s P4 section for the full design rationale.
+- **v3 (P6):** adds `InputCommand::view_tick` (25 → 29 bytes) — the tick
+  whose world the sender drew when it stamped this input, which the server's
+  rewind (`server::buildRewoundView`) needs to resolve a shot against what
+  the shooter actually saw rather than a live or derived position. Also adds
+  `MsgType::kHitConfirm = 7`, additive, using the extension path this
+  document already designated. A version-2 header is rejected outright —
+  there is no cross-version compatibility. See `docs/project-history.md`'s P6
+  section for the alternatives considered (deriving the tick server-side,
+  smuggling it into `seq`) and why they lost.
 
 ## Packet header — 24 bytes
 
@@ -62,7 +73,7 @@ Every packet on the wire starts with this header.
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | must equal `kProtocolMagic` |
-| 4 | 1 | `version` | must equal `kProtocolVersion` (2) |
+| 4 | 1 | `version` | must equal `kProtocolVersion` (3) |
 | 5 | 1 | `type` | `MsgType`; must be `1..kMaxMsgType` |
 | 6 | 2 | `payload_len` | bytes following the header; must equal the bytes actually present |
 | 8 | 4 | `tick` | sender's simulation tick — **populated at P2** on every outgoing packet. On a `Snapshot`, this doubles as P3's reconciliation acknowledgment: the server consumes inputs strictly in tick order, so a snapshot at tick `S` has consumed every input stamped `≤ S`, and the client's reconciliation replay covers only the pending inputs stamped after it |
@@ -72,9 +83,8 @@ Every packet on the wire starts with this header.
 | 22 | 2 | `ack_seq` | reliable channel ack — **populated at P2**, echoed by the server on `JoinAccept`/`Leave` replies to the request's `seq`; zero elsewhere |
 
 `MsgType`: `kInvalid = 0, kInput = 1, kSnapshot = 2, kJoinRequest = 3,
-kJoinAccept = 4, kLeave = 5, kSnapshotDelta = 6`. `kMaxMsgType = 6`. Values
-`7..255` are unused; P6's hit-feedback message can take `7`, added
-additively without touching the header or bumping the version again.
+kJoinAccept = 4, kLeave = 5, kSnapshotDelta = 6, kHitConfirm = 7`.
+`kMaxMsgType = 7`. Values `8..255` are unused.
 
 **Every header field is now both populated and consumed.** P2 stamped every
 field but only fully consumed `seq`/`ack_seq` (the join/leave channel — what
@@ -85,7 +95,7 @@ sync (see the field notes above), and `send_time_ms` drives the input-to-
 snapshot latency estimate. No byte layout changed to make this happen —
 see "Version history" below.
 
-## `InputCommand` payload — 25 bytes
+## `InputCommand` payload — 29 bytes
 
 `MsgType::kInput`'s payload.
 
@@ -98,6 +108,7 @@ see "Version history" below.
 | 16 | 4 | `aim_x` (IEEE-754 binary32) — **added at v2** |
 | 20 | 4 | `aim_y` (IEEE-754 binary32) — **added at v2** |
 | 24 | 1 | `fire` |
+| 25 | 4 | `view_tick` — the tick whose world the sender drew when it sent this input; 0 = uncompensated (added at v3) |
 
 ## `JoinRequest` payload — empty
 
@@ -186,6 +197,23 @@ true if that constant ever changes.
 - A player unchanged since the baseline (all five fields compare `==`) costs
   zero bytes: no bit in `changed_mask`, no record.
 
+## `HitConfirm` payload — 8 bytes
+
+`MsgType::kHitConfirm`'s payload — **added at P6**. Sent server → shooter
+only, never broadcast, in reply to a fire that resolved a hit (compensated or
+not). Not a reliable channel: at most one per hit, no retransmit or ack.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | `target_id` — the player hit; never `0` (`kInvalidPlayerId` is rejected on both the encode and decode side) |
+| 4 | 4 | `fire_tick` — echoes the `InputCommand::tick` of the shot that hit |
+
+The header's own `tick` on this packet is the *server's* tick the hit
+resolved on (i.e. `Server::tick()`'s current tick when pass 2 ran), not
+`fire_tick` — the two differ whenever the shot was buffered before being
+consumed, the same tick-vs-buffering distinction every other message type
+already draws.
+
 ## Maximum packet size
 
 ```
@@ -232,7 +260,7 @@ Every decoder rejects malformed input rather than normalizing it:
   clamped. Clamping would leave `out.count` describing more players than were
   filled, which is the same out-of-bounds read one level up in the caller.
 - A payload longer or shorter than its declared framing (`InputCommand`'s
-  fixed 25 bytes; `WorldSnapshot`'s `count × 24` bytes; `JoinAccept`'s fixed
+  fixed 29 bytes; `WorldSnapshot`'s `count × 24` bytes; `JoinAccept`'s fixed
   4 bytes) — rejected.
 - A non-finite (`NaN`/`Infinity`) float in any `move_x`/`move_y`/`aim_x`/
   `aim_y` or `PlayerState` field — rejected. An unauthenticated sender can
@@ -244,6 +272,9 @@ Every decoder rejects malformed input rather than normalizing it:
   `docs/project-history.md`'s P2 security review section.
 - A `JoinAccept` carrying `player_id == 0` (`kInvalidPlayerId`) — rejected on
   both the encode and decode side; `0` never travels as an accepted id.
+- **`HitConfirm` (added at P6):** the same `target_id == 0` rejection as
+  `JoinAccept`, on both the encode and decode side, and the same strict
+  8-byte framing rule as every other fixed-size payload.
 - **`SnapshotDelta` (added at P4):** a `changed_mask` bit not present in
   `present_mask` — rejected (a record for a player simultaneously claimed
   absent is incoherent). A payload whose length disagrees with
@@ -256,6 +287,12 @@ Every decoder rejects malformed input rather than normalizing it:
 **The one documented exception is `InputCommand::fire`**, decoded as `u8 !=
 0` rather than requiring exactly `0` or `1`. A `bool` has no invalid bit
 pattern to exploit, so strictness there buys nothing.
+
+**`InputCommand::view_tick` is not range-checked by the codec** (added at
+v3). Any `uint32_t` value decodes successfully — its plausibility depends on
+session state the codec has no access to (how far behind the shooter's
+acknowledged snapshot it is, how far behind the fire tick), which only the
+server can judge, in `server::buildRewoundView`.
 
 On rejection, a decoder never partially populates the caller's output
 struct — it is assigned only once every check has passed.

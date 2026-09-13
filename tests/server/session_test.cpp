@@ -232,5 +232,23 @@ TEST(SessionTableTest, ClearsTheAcknowledgedTickWhenASessionIsRemoved) {
   EXPECT_EQ(table.ackedSnapshotTick(b), 0u);
 }
 
+TEST(SessionTableTest, JoinedTickRecordsTheFirstJoinOnly) {
+  SessionTable table;
+  const uint32_t n = table.joinOrGet(ep(0), 50);
+  EXPECT_EQ(table.joinedTick(n), 50u);
+
+  // A retransmitted join is idempotent and does not move joined_tick.
+  EXPECT_EQ(table.joinOrGet(ep(0), 80), n);
+  EXPECT_EQ(table.joinedTick(n), 50u);
+
+  EXPECT_EQ(table.joinedTick(0), 0u);
+  EXPECT_EQ(table.joinedTick(31), 0u);
+
+  ASSERT_TRUE(table.remove(ep(0)));
+  const uint32_t reused = table.joinOrGet(ep(1), 120);
+  EXPECT_EQ(reused, n);
+  EXPECT_EQ(table.joinedTick(reused), 120u);
+}
+
 }  // namespace
 }  // namespace server

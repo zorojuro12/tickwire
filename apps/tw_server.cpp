@@ -89,6 +89,9 @@ uint32_t runThreaded(net::UdpTransport& transport, uint32_t ticks_limit, uint32_
   std::printf("packets_ingested=%llu ingest_overflows=%llu\n",
               static_cast<unsigned long long>(runner.packetsIngested()),
               static_cast<unsigned long long>(srv->ingestOverflows()));
+  std::printf("lagcomp rewound_shots=%llu rewinds_rejected=%llu\n",
+              static_cast<unsigned long long>(srv->rewoundShots()),
+              static_cast<unsigned long long>(srv->rewindsRejected()));
   return runner.ticksRun();
 }
 
@@ -186,6 +189,9 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(srv->snapshotBytesFullEquivalent()),
               static_cast<unsigned long long>(srv->deltasSent()),
               static_cast<unsigned long long>(srv->keyframesSent()));
+  std::printf("lagcomp rewound_shots=%llu rewinds_rejected=%llu\n",
+              static_cast<unsigned long long>(srv->rewoundShots()),
+              static_cast<unsigned long long>(srv->rewindsRejected()));
   std::fflush(stdout);
   return 0;
 }
