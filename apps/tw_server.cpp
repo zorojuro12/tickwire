@@ -26,8 +26,15 @@
 
 namespace {
 
-volatile std::sig_atomic_t g_stop = 0;
-void handleSigint(int) { g_stop = 1; }
+// std::atomic rather than volatile sig_atomic_t: the latter's guarantee is
+// limited to a signal interrupting execution on the *same* thread that later
+// reads it, with no cross-thread visibility or ordering. The threaded path
+// (--threads 2) has a signal handler write this while a background thread
+// polls it -- exactly the case volatile sig_atomic_t doesn't cover. A
+// lock-free atomic is explicitly permitted from a signal handler.
+static_assert(std::atomic<int>::is_always_lock_free);
+std::atomic<int> g_stop{0};
+void handleSigint(int) { g_stop.store(1, std::memory_order_relaxed); }
 
 void printUsage() {
   std::fprintf(
@@ -63,7 +70,7 @@ uint32_t runThreaded(net::UdpTransport& transport, uint32_t ticks_limit, uint32_
     done.store(true, std::memory_order_relaxed);
   });
   while (!done.load(std::memory_order_relaxed)) {
-    if (g_stop != 0) runner.requestStop();
+    if (g_stop.load(std::memory_order_relaxed) != 0) runner.requestStop();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   t.join();
@@ -156,7 +163,8 @@ int main(int argc, char** argv) {
 
   uint32_t ticks_run = 0;
   std::array<uint32_t, 8> ready{};
-  while (g_stop == 0 && (ticks_limit == 0 || ticks_run < ticks_limit)) {
+  while (g_stop.load(std::memory_order_relaxed) == 0 &&
+         (ticks_limit == 0 || ticks_run < ticks_limit)) {
     const size_t n = poll.wait(50, ready);
     for (size_t i = 0; i < n; ++i) {
       if (ready[i] == 2) {

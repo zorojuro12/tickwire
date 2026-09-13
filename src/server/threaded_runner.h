@@ -26,11 +26,15 @@ namespace server {
 // What's shared between the threads: only `ring_` inside Server (the reason
 // Ring is swappable) and the transport, which needs no mutex -- send() and
 // tryReceive() touch only the fd and mutate no shared member state, and
-// POSIX allows concurrent sendto/recvfrom on one socket. Everything else in
-// Server is touched only by tick(), i.e. only by the calling thread.
-// `packets_ingested_` is written only by the I/O thread and read only after
-// both threads have joined, so it needs no atomic either -- only `stop_`
-// does, since it's the one flag both threads touch concurrently.
+// POSIX allows concurrent sendto/recvfrom on one socket. `world_`, `sessions_`,
+// `inputs_`, and every counter tick() itself updates are touched only by the
+// calling thread; `ingest_overflows_` is the one Server counter the I/O
+// thread writes instead, via ingest()/ingestBatch() -- still single-writer,
+// still read only after both threads have joined (never concurrently with
+// the write), so it needs no atomic either. `packets_ingested_` here follows
+// the same rule: written only by the I/O thread, read only after both
+// threads have joined. Only `stop_` does need one, since it's the one flag
+// both threads touch concurrently.
 template <net::Transport T, typename Ring, size_t JitterSamples = 65536>
 class ThreadedRunner {
  public:
