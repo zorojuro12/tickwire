@@ -96,6 +96,12 @@ if(TW_SANITIZER MATCHES "thread")
   add_test(NAME tsan_detects_race COMMAND fault_race)
   set_tests_properties(tsan_detects_race PROPERTIES
     PASS_REGULAR_EXPRESSION "data race")
+
+  add_executable(fault_relaxed_ring tests/faults/relaxed_ring.cpp)
+  target_link_libraries(fault_relaxed_ring PRIVATE tickwire_sim_flags Threads::Threads)
+  add_test(NAME tsan_detects_relaxed_ring COMMAND fault_relaxed_ring)
+  set_tests_properties(tsan_detects_relaxed_ring PROPERTIES
+    PASS_REGULAR_EXPRESSION "data race")
 endif()
 
 add_executable(tw_server apps/tw_server.cpp)
