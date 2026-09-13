@@ -87,7 +87,10 @@ bool UdpTransport::tryReceive(PacketSlot& slot) {
       if (errno == EINTR) continue;
       return false;
     }
-    if (static_cast<size_t>(n) > kMaxPacket) continue;  // truncated: discard and drain onward
+    if (static_cast<size_t>(n) > kMaxPacket) {
+      ++oversized_skipped_;
+      continue;  // truncated: discard and drain onward
+    }
 
     slot.len = static_cast<uint16_t>(n);
     slot.peer.addr_be = from.sin_addr.s_addr;

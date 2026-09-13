@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <vector>
@@ -178,6 +179,26 @@ TEST(UdpTransportTest, ClosesSocketOnDestructionAndIsMoveOnly) {
 
   static_assert(!std::is_copy_constructible_v<UdpTransport>);
   static_assert(!std::is_copy_assignable_v<UdpTransport>);
+}
+
+TEST(UdpTransportTest, OversizedDatagramIsSkippedAndCounted) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  sendRawDatagram(receiver->localEndpoint(), 1400);
+
+  const std::array<std::byte, 8> payload = {std::byte{1}, std::byte{2}, std::byte{3},
+                                             std::byte{4}, std::byte{5}, std::byte{6},
+                                             std::byte{7}, std::byte{8}};
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload));
+
+  PacketSlot slot;
+  ASSERT_TRUE(pollReceive(*receiver, slot));
+  EXPECT_EQ(slot.len, 8u);
+  EXPECT_EQ(receiver->oversizedSkipped(), 1u);
 }
 
 }  // namespace

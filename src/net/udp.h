@@ -28,9 +28,12 @@ class UdpTransport {
   bool send(const Endpoint& to, std::span<const std::byte> payload);
   bool tryReceive(PacketSlot& slot);
 
+  uint64_t oversizedSkipped() const noexcept { return oversized_skipped_; }
+
  private:
   int fd_ = -1;
   Endpoint local_;
+  uint64_t oversized_skipped_ = 0;
 };
 static_assert(Transport<UdpTransport>);
 
