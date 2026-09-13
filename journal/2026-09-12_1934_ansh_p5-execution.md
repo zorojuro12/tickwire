@@ -1,12 +1,13 @@
 # 2026-09-12 — ansh — P5 execution: threading, SpscRing, benchmark numbers
 
-**Status:** P5 complete. All 13 tasks executed inline (no delegation) on
-branch `phase-5-threading-queue-benchmark`, verified green on `scripts/tw
-bash scripts/ci.sh` (plain/ASan/TSan + toolchain assertions) after every task
-boundary and again after the security review's fixes. The headline numbers
-table exists at `docs/benchmarks.md`, linked from `README.md`'s new
-"Measured results" section. Branch not yet merged into `dev` — that's
-`finishing-a-development-branch`'s job next.
+**Status:** P5 complete and merged into `dev` (`563f8e9`, `--no-ff`, branch
+kept per request rather than deleted). All 13 tasks executed inline (no
+delegation) on branch `phase-5-threading-queue-benchmark`, verified green on
+`scripts/tw bash scripts/ci.sh` (plain/ASan/TSan + toolchain assertions)
+after every task boundary, again after the security review's fixes, and
+again on the merged `dev` tree (40/40). The headline numbers table exists at
+`docs/benchmarks.md`, linked from `README.md`'s new "Measured results"
+section. `dev` is 38 commits ahead of `origin/dev`, not pushed.
 **Decided:** `recvmmsg` batching rejected as the default (`--batch-ingest`
 stays opt-in) — Group 4 showed under 0.5% throughput difference at real
 load. Lock-free wins measurably at every rate tested but the gap is
@@ -22,9 +23,8 @@ section.
 status corrected from stale "through P3"), `CLAUDE.md` (file-structure rows,
 new Verified-constraints entry for the two-thread ownership split),
 `docs/project-history.md` (P5 decisions and Task 12 security findings).
-**Next:** Hand off to `finishing-a-development-branch` to decide the merge.
-Per `docs/dev-workflow-guide.md`, expected choice is self-merge into `dev`
-with `--no-ff` (no PR ceremony in this project).
+**Next:** Nothing P5-specific left. Whoever picks this up next is starting a
+new phase (P6 — lag compensation) or deciding whether/when to push `dev`.
 **Blocked on:** Nothing.
 **Touches:** `src/server/{spsc_ring,mutex_ring,threaded_runner,jitter_stats}.h`,
 `src/net/udp.{h,cpp}`, `src/server/server.h`, `apps/tw_server.cpp`,
