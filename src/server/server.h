@@ -53,24 +53,26 @@ class Server {
   // Batched receive via the transport's receiveBatch() (recvmmsg), for
   // transports that support it. Only ever called for such a T -- never
   // instantiated for one that doesn't, the same way ingest()'s callers never
-  // reach a transport without tryReceive(). A batch landing after the ring
-  // has filled is dropped past that point (counted once, matching ingest()'s
-  // own single-overflow accounting), not requeued.
+  // reach a transport without tryReceive(). Unlike ingest() (which checks
+  // ring space *before* pulling from the transport, so a full ring simply
+  // leaves data in the kernel's receive buffer for a later call),
+  // receiveBatch() has already dequeued every staged item from the kernel
+  // before this loop runs -- so a batch landing after the ring fills mid-
+  // drain is unrecoverably lost, not merely deferred. Every such loss is
+  // counted (not just one per batch), so ingest_overflows_ reflects the
+  // real drop count even under --batch-ingest.
   size_t ingestBatch() noexcept {
     constexpr size_t kBatchSize = 32;
     std::array<net::PacketSlot, kBatchSize> staging{};
     const size_t filled = transport_.receiveBatch(std::span<net::PacketSlot>(staging));
     size_t accepted = 0;
-    for (size_t i = 0; i < filled; ++i) {
+    for (; accepted < filled; ++accepted) {
       net::PacketSlot* slot = ring_.acquireWrite();
-      if (slot == nullptr) {
-        ++ingest_overflows_;
-        break;
-      }
-      *slot = staging[i];
+      if (slot == nullptr) break;
+      *slot = staging[accepted];
       ring_.commitWrite();
-      ++accepted;
     }
+    if (accepted < filled) ingest_overflows_ += (filled - accepted);
     return accepted;
   }
 
