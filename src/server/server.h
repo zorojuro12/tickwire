@@ -155,6 +155,8 @@ class Server {
       // player inherits the same id, up to ~1s later -- found by the P3
       // Task 8 security review.
       inputs_[expired[i] - 1].reset();
+      hits_[expired[i] - 1] = 0;
+      shots_[expired[i] - 1] = 0;
     }
   }
 
@@ -229,8 +231,14 @@ class Server {
     world_.removePlayer(id);
     // See the identical note at the timeout-expiry call site: clears any
     // future-ticked input this session already queued, so a reused id
-    // doesn't inherit and execute it under a new, unconsenting owner.
+    // doesn't inherit and execute it under a new, unconsenting owner. The
+    // same reasoning applies to hits_/shots_: a reused id must not inherit
+    // the departed occupant's cumulative counts (P3's security review noted
+    // this for hits_ but left it unfixed; P6 makes it client-visible and
+    // adds shots_ with the same indexing, so both are fixed here).
     inputs_[id - 1].reset();
+    hits_[id - 1] = 0;
+    shots_[id - 1] = 0;
   }
 
   // Buffers `in` against the tick it is stamped for; does not apply it.

@@ -32,6 +32,15 @@ void injectJoin(RecordingTransport& tp, const net::Endpoint& from, uint16_t seq 
   tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
 }
 
+void injectLeave(RecordingTransport& tp, const net::Endpoint& from) {
+  net::PacketHeader h;
+  h.type = net::MsgType::kLeave;
+  std::array<std::byte, net::kMaxPacket> buf{};
+  const size_t written = net::framePacket(h, {}, buf);
+  ASSERT_GT(written, 0u);
+  tp.inject(from, std::span<const std::byte>(buf).subspan(0, written));
+}
+
 // Frames and injects one kInput packet, with both the header's ack_tick and
 // the payload's view_tick set explicitly.
 void injectShot(RecordingTransport& tp, const net::Endpoint& from, uint32_t player_id,
@@ -186,6 +195,37 @@ TEST(ServerLagCompTest, HitIsConfirmedToTheShooterOnly) {
     }
     EXPECT_EQ(hit_confirms, 0u);
   }
+}
+
+TEST(ServerLagCompTest, ShotAndHitCountsResetWhenAnIdIsReused) {
+  constexpr net::Endpoint kEpC{0x7F000001u, 0x3003u};
+
+  auto tp = std::make_unique<RecordingTransport>();
+  auto srv = std::make_unique<Server<RecordingTransport>>(*tp);
+
+  injectJoin(*tp, kEpA, 1);
+  injectJoin(*tp, kEpB, 2);
+  srv->ingest();
+  srv->tick(0);
+
+  injectShot(*tp, kEpA, 1, /*input_tick=*/2, 0.0f, 0.0f, 1.0f, 0.0f, /*fire=*/true,
+             /*ack_tick=*/0, /*view_tick=*/0);
+  srv->ingest();
+  srv->tick(16);
+  EXPECT_EQ(srv->hits(1), 1u);
+  EXPECT_EQ(srv->shots(1), 1u);
+
+  injectLeave(*tp, kEpA);
+  srv->ingest();
+  srv->tick(32);
+
+  injectJoin(*tp, kEpC, 1);
+  srv->ingest();
+  srv->tick(48);
+  ASSERT_EQ(srv->playerFor(kEpC), 1u);
+
+  EXPECT_EQ(srv->hits(1), 0u);
+  EXPECT_EQ(srv->shots(1), 0u);
 }
 
 }  // namespace
