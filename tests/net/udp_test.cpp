@@ -229,6 +229,39 @@ TEST(UdpTransportTest, ReceiveBatchFillsSeveralSlotsInOneCall) {
   EXPECT_EQ(receiver->receiveBatch(std::span<PacketSlot>(*slots)), 0u);
 }
 
+TEST(UdpTransportTest, ReceiveBatchKeepsPayloadAndMetadataPairedAcrossASkippedDatagram) {
+  const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
+  auto sender = std::make_unique<UdpTransport>();
+  auto receiver = std::make_unique<UdpTransport>();
+  ASSERT_TRUE(sender->bind(loopback_be, 0));
+  ASSERT_TRUE(receiver->bind(loopback_be, 0));
+
+  // An oversized datagram lands between two well-formed ones in the same
+  // batch. If receiveBatch() compacts metadata into slots[filled] without
+  // also moving the payload bytes (which recvmmsg wrote at slots[i].data,
+  // not slots[filled].data), "b"'s reported metadata gets paired with "a"'s
+  // bytes -- a real sender/length misattribution, not just a lost packet.
+  const std::array<std::byte, 4> payload_a = {std::byte{'a'}, std::byte{'a'}, std::byte{'a'},
+                                               std::byte{'a'}};
+  const std::array<std::byte, 4> payload_b = {std::byte{'b'}, std::byte{'b'}, std::byte{'b'},
+                                               std::byte{'b'}};
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload_a));
+  sendRawDatagram(receiver->localEndpoint(), 1400);
+  ASSERT_TRUE(sender->send(receiver->localEndpoint(), payload_b));
+
+  auto slots = std::make_unique<std::array<PacketSlot, 8>>();
+  size_t filled = 0;
+  for (int i = 0; i < 1000 && filled == 0; ++i) {
+    filled = receiver->receiveBatch(std::span<PacketSlot>(*slots));
+  }
+  ASSERT_EQ(filled, 2u);
+  EXPECT_EQ((*slots)[0].len, 4u);
+  EXPECT_EQ(std::memcmp((*slots)[0].data.data(), payload_a.data(), 4), 0);
+  EXPECT_EQ((*slots)[1].len, 4u);
+  EXPECT_EQ(std::memcmp((*slots)[1].data.data(), payload_b.data(), 4), 0);
+  EXPECT_EQ(receiver->oversizedSkipped(), 1u);
+}
+
 TEST(UdpTransportTest, OversizedRetryLoopIsCappedPerCall) {
   const uint32_t loopback_be = htonl(INADDR_LOOPBACK);
   auto sender = std::make_unique<UdpTransport>();

@@ -138,6 +138,14 @@ size_t UdpTransport::receiveBatch(std::span<PacketSlot> slots) {
       ++oversized_skipped_;
       continue;
     }
+    // recvmmsg wrote message i's payload into slots[i].data (that's what
+    // iovs[i] pointed at) -- once an earlier message in this batch has been
+    // skipped, filled < i, and the bytes must move to slots[filled] along
+    // with the metadata, or a later slot's reported length/sender ends up
+    // paired with an earlier slot's actual payload.
+    if (filled != static_cast<size_t>(i)) {
+      std::memcpy(slots[filled].data.data(), slots[i].data.data(), msgs[i].msg_len);
+    }
     slots[filled].len = static_cast<uint16_t>(msgs[i].msg_len);
     slots[filled].peer.addr_be = froms[i].sin_addr.s_addr;
     slots[filled].peer.port_be = froms[i].sin_port;
