@@ -8,6 +8,13 @@
 
 namespace sim {
 
+// Nearest player (excluding the shooter) whose circle the ray from the
+// shooter's position along (aim_x, aim_y) intersects, within view. The
+// shooter itself must be present in view; std::nullopt when it is absent,
+// aim is degenerate, or nothing is hit.
+std::optional<uint32_t> resolveHitscan(const WorldSnapshot& view, uint32_t shooter,
+                                        float aim_x, float aim_y);
+
 class World {
  public:
   // False if full, id taken, id 0, or a non-finite coordinate.
