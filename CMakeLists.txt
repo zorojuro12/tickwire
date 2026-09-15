@@ -134,6 +134,8 @@ add_test(NAME server_app_sim_load
 # meaning: a p50 of >= 17'000'000 ns (8-9 digits, leading "17"-"19" or "2"-"9").
 set_tests_properties(server_app_sim_load PROPERTIES
   PASS_REGULAR_EXPRESSION "jitter_ns p50=(1[7-9]|[2-9][0-9])[0-9][0-9][0-9][0-9][0-9][0-9]")
+add_test(NAME server_app_fixed_port COMMAND tw_server --port 41237 --ticks 5)
+set_tests_properties(server_app_fixed_port PROPERTIES PASS_REGULAR_EXPRESSION "port=41237\n")
 
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)
