@@ -140,6 +140,15 @@ set_tests_properties(server_app_fixed_port PROPERTIES PASS_REGULAR_EXPRESSION "p
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)
 
+add_test(NAME loadclient_sweep_ticks_zero_rejected
+  COMMAND tw_loadclient --host 127.0.0.1 --port 1 --sweep-ticks 0)
+set_tests_properties(loadclient_sweep_ticks_zero_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "--sweep-ticks must be >= 1")
+add_test(NAME loadclient_sweep_ticks_negative_rejected
+  COMMAND tw_loadclient --host 127.0.0.1 --port 1 --sweep-ticks -5)
+set_tests_properties(loadclient_sweep_ticks_negative_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "--sweep-ticks must be >= 1")
+
 add_test(NAME e2e_udp
   COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
           "$<TARGET_FILE:tw_server>" "$<TARGET_FILE:tw_loadclient>")
