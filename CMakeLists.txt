@@ -159,6 +159,12 @@ add_test(NAME e2e_udp
 # (set -e/pipefail in the script, plus tw_loadclient's own
 # joined==players return value) is the pass/fail signal here.
 
+add_executable(lagcomp_probe tools/lagcomp_probe.cpp)
+target_link_libraries(lagcomp_probe PRIVATE libserver libclient)
+add_test(NAME lagcomp_probe_smoke COMMAND lagcomp_probe)
+set_tests_properties(lagcomp_probe_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "topology=test reverse_ticks=120 axis=y aim_sigma=0.00 on=")
+
 add_executable(bench_queue tools/bench_queue.cpp)
 target_link_libraries(bench_queue PRIVATE libserver)
 add_test(NAME bench_queue_spsc COMMAND bench_queue --ring spsc --items 10000 --rate 0)
