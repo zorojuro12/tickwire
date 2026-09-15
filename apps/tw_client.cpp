@@ -19,6 +19,7 @@
 namespace {
 
 constexpr float kSide = 800.0f;
+constexpr float kZoom = 4.0f;
 constexpr uint32_t kLatencyStepMs = 25;
 constexpr uint32_t kMaxLatencyMs = 500;
 
@@ -114,11 +115,12 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     const sim::WorldSnapshot& snap = client->latestSnapshot();
     float local_x = 0.0f, local_y = 0.0f;
     const bool have_local = client->localPosition(local_x, local_y);
+    const client::Camera cam =
+        have_local ? client::Camera{local_x, local_y, kZoom} : client::Camera{0.0f, 0.0f, kZoom};
 
     const Vector2 mouse = GetMousePosition();
-    const float scale = kSide / (2.0f * sim::kArenaHalf);
-    const float world_mx = mouse.x / scale - sim::kArenaHalf;
-    const float world_my = sim::kArenaHalf - mouse.y / scale;
+    float world_mx = 0.0f, world_my = 0.0f;
+    client::screenToWorld(mouse.x, mouse.y, kSide, cam, world_mx, world_my);
 
     float aim_x = 0.0f, aim_y = 0.0f;
     if (have_local) client::aimFromCursor(local_x, local_y, world_mx, world_my, aim_x, aim_y);
@@ -133,7 +135,17 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
 
     BeginDrawing();
     ClearBackground(BLACK);
-    DrawRectangleLines(0, 0, static_cast<int>(kSide), static_cast<int>(kSide), RAYWHITE);
+
+    // The arena border is drawn in world space, so it scrolls with the
+    // camera and stays visible when the local player nears the edge.
+    {
+      const client::ScreenPos top_left =
+          client::worldToScreen(-sim::kArenaHalf, sim::kArenaHalf, kSide, cam);
+      const float scale = client::worldToScreenRadius(1.0f, kSide, kZoom);
+      DrawRectangleLines(static_cast<int>(top_left.x), static_cast<int>(top_left.y),
+                          static_cast<int>(2.0f * sim::kArenaHalf * scale),
+                          static_cast<int>(2.0f * sim::kArenaHalf * scale), RAYWHITE);
+    }
 
     // Remote players are read through remotePosition() -- interpolated
     // between snapshots when interpolation is on, the raw newest snapshot
@@ -145,8 +157,8 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
       if (snap.players[i].id == client->playerId()) continue;
       float rx = 0.0f, ry = 0.0f;
       if (!client->remotePosition(snap.players[i].id, rx, ry)) continue;
-      const client::ScreenPos sp = client::worldToScreen(rx, ry, kSide, 0.0f, 0.0f);
-      const float r = client::worldToScreenRadius(snap.players[i].radius, kSide);
+      const client::ScreenPos sp = client::worldToScreen(rx, ry, kSide, cam);
+      const float r = client::worldToScreenRadius(snap.players[i].radius, kSide, kZoom);
       // Red while interpolating, orange while not -- the same device the
       // green/yellow local player already uses for the prediction toggle.
       const Color color = client->interpolationEnabled() ? RED : ORANGE;
@@ -154,8 +166,8 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     }
 
     if (have_local) {
-      const client::ScreenPos sp = client::worldToScreen(local_x, local_y, kSide, 0.0f, 0.0f);
-      const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide);
+      const client::ScreenPos sp = client::worldToScreen(local_x, local_y, kSide, cam);
+      const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide, kZoom);
       // Green while predicting, yellow while not -- the toggle's state is
       // visible without reading the HUD.
       const Color color = client->predictionEnabled() ? GREEN : YELLOW;
@@ -166,9 +178,9 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     // the arena, so a shot that "looked like" a hit is visible as it happens.
     if (have_local && fire) {
       constexpr float kTracerLen = 4.0f * sim::kArenaHalf;
-      const client::ScreenPos sp0 = client::worldToScreen(local_x, local_y, kSide, 0.0f, 0.0f);
+      const client::ScreenPos sp0 = client::worldToScreen(local_x, local_y, kSide, cam);
       const client::ScreenPos sp1 = client::worldToScreen(
-          local_x + aim_x * kTracerLen, local_y + aim_y * kTracerLen, kSide, 0.0f, 0.0f);
+          local_x + aim_x * kTracerLen, local_y + aim_y * kTracerLen, kSide, cam);
       DrawLine(static_cast<int>(sp0.x), static_cast<int>(sp0.y), static_cast<int>(sp1.x),
                 static_cast<int>(sp1.y), Fade(WHITE, 0.4f));
     }
@@ -179,22 +191,25 @@ int runClient(const std::string& host, uint16_t port, uint32_t initial_latency_m
     if (hit_flash_frames > 0) {
       float tx = 0.0f, ty = 0.0f;
       if (client->remotePosition(client->lastHitTarget(), tx, ty)) {
-        const client::ScreenPos sp = client::worldToScreen(tx, ty, kSide, 0.0f, 0.0f);
-        const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide) * 1.6f;
+        const client::ScreenPos sp = client::worldToScreen(tx, ty, kSide, cam);
+        const float r = client::worldToScreenRadius(sim::kPlayerRadius, kSide, kZoom) * 1.6f;
         DrawCircleLines(static_cast<int>(sp.x), static_cast<int>(sp.y), r, WHITE);
       }
       --hit_flash_frames;
     }
 
-    DrawText(TextFormat("tick=%u latency=%ums players=%u pred=%s rtt=%ums lead=%d err_p99=%.2f "
-                          "interp=%s render=%u lagcomp=%s hits=%u",
-                          client->latestSnapshotTick(), latency_ms, snap.count,
-                          client->predictionEnabled() ? "on" : "off", client->rttMs(),
-                          client->clockLead(), client->predictionError().p99(),
-                          client->interpolationEnabled() ? "on" : "off", client->renderTick(),
-                          client->lagCompensationEnabled() ? "on" : "off",
-                          client->hitsConfirmed()),
+    DrawText(TextFormat("tick=%u latency=%ums rtt=%ums lead=%d players=%u",
+                          client->latestSnapshotTick(), latency_ms, client->rttMs(),
+                          client->clockLead(), snap.count),
               10, 10, 20, RAYWHITE);
+    DrawText(TextFormat("pred=%s err_p99=%.2f interp=%s render=%u",
+                          client->predictionEnabled() ? "on" : "off",
+                          client->predictionError().p99(),
+                          client->interpolationEnabled() ? "on" : "off", client->renderTick()),
+              10, 34, 20, RAYWHITE);
+    DrawText(TextFormat("lagcomp=%s hits=%u", client->lagCompensationEnabled() ? "on" : "off",
+                          client->hitsConfirmed()),
+              10, 58, 20, RAYWHITE);
     EndDrawing();
   }
 
