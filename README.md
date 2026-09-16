@@ -187,6 +187,62 @@ maximum rewind depth (24 ticks) is comfortably inside `kMaxRewindTicks` (45).
   live in the demo — see [Measured results](#measured-results) for the hit
   rate this buys at 200ms of round-trip latency.
 
+## What building it turned up
+
+Six findings that changed how the project was built. Each links to its full
+writeup in [`docs/project-history.md`](docs/project-history.md), which records
+every phase's decisions, pivots, and dead ends.
+
+**A test runner that reports success without running anything.** Debian 11's
+packaged CMake (3.18) doesn't support `ctest --test-dir` — the exact command
+every TDD checkpoint here runs. It doesn't error: it prints
+`No tests were found!!!` and **exits 0**. Every red step would have passed
+having executed nothing. The toolchain image pins CMake 3.28.4 from Kitware's
+tarball rather than apt specifically because of this.
+([P0](docs/project-history.md#p0--toolchain--skeleton))
+
+**`-march=x86-64-v2` does not exist in GCC 10.** Micro-architecture levels
+landed in GCC 11, so the originally planned value simply failed the build —
+caught by a compiler error, not by review. `-march=x86-64` replaced it, and
+baseline x86-64 has no FMA at all, which closes the float-contraction hazard
+by construction instead of by flag discipline.
+([P0](docs/project-history.md#p0--toolchain--skeleton))
+
+**The canonical client-prediction model didn't fit, and why is most of P3.**
+Gabriel Gambetta's formulation — the server applies inputs as they arrive and
+reports the last one processed, the client replays the rest — was built at P2
+and then rejected. Applying on arrival latches a velocity the server
+integrates for a *jitter-dependent* number of ticks, which the client has no
+way to reproduce; reconciliation's replay assumes "N pending inputs = N
+simulated steps." Inputs became tick-matched instead: one per player per tick,
+at the tick it was stamped for, with an underrun repeating the latched
+velocity. ([P3](docs/project-history.md#p3--prediction-reconciliation-clock-sync))
+
+**The clock-sync controller oscillated because it's a P-controller with dead
+time.** A ±1 nudge per snapshot closes a loop whose observations are already a
+round trip stale, so several corrections fire before any of them becomes
+visible. Under 100ms latency + 10ms jitter the observed lead swung from −43 to
++42 ticks, widening rather than settling. Fixed with an EMA-smoothed estimate
+and a correction cooldown — damping proportional to the delay, the textbook
+answer to a textbook failure mode, not a tuning slip.
+([P3](docs/project-history.md#p3--prediction-reconciliation-clock-sync))
+
+**`rttMs()` is not ping, and is never labelled as such.** It measures
+input-to-snapshot latency, which includes however long the server's
+`InputBuffer` held the input plus the 20 Hz broadcast interval — roughly
+50–100ms above the wire round trip. That is the number a player actually
+feels, which is why it's the one on the HUD, and why it is deliberately never
+called "ping" anywhere in the UI or the docs.
+([P3](docs/project-history.md#p3--prediction-reconciliation-clock-sync))
+
+**A bug hid for four phases because every test used `--port 0`.** The server
+passed a host-order port to `bind()` without `htons`, so `--port 41234` bound
+4769 and the README's own demo recipe could never connect. Every script and
+test used `--port 0` — and zero byte-swapped is still zero. Found by a human
+running the documented recipe, not by the suite; the regression test that now
+covers it asserts a *fixed* port for exactly this reason.
+([P6 follow-up](docs/project-history.md#p6-demo-follow-up))
+
 ## What's next (P7)
 
 - **P7** — stretch scope per the design doc's build order: an `io_uring`
