@@ -18,11 +18,11 @@ changed or been discovered since.
 | `src/sim/` | `libsim` — deterministic simulation core (`sim::World`) and POD payload types. No I/O, no wall-clock reads, no allocation. |
 | `src/net/` | `libnet` — wire protocol codecs, bounds-checked byte cursors, framing (`net::framePacket`), and the `Transport` implementations (UDP, loopback, simulated). |
 | `src/server/` | `libserver` — `Server<T, Ring>`, `SessionTable` (endpoint↔player binding), the I/O↔sim seam (`PacketRing`, `MutexRing`, or the lock-free `SpscRing` — swappable via `Ring`), `ThreadedRunner` (splits I/O and simulation across two real threads over that seam), `JitterStats` (percentile recorder), the epoll/timerfd tick loop (`PollSet`/`TickTimer`), the monotonic clock (`monotonicMs`/`monotonicNs`), and `rewind.{h,cpp}` (`server::buildRewoundView` — the world as a shooter's client actually drew it, for lag-compensated hit resolution). |
-| `src/client/` | `libclient` — `Client<T>` (join handshake, input send, snapshot store) and the pure world→screen view mapping used by the raylib renderer. |
+| `src/client/` | `libclient` — `Client<T>` (join handshake, input send, snapshot store) and the pure world→screen view mapping used by the raylib renderer (`client::Camera`, `worldToScreen`/`worldToScreenRadius`, and their inverse `screenToWorld`). |
 | `apps/` | Thin executables: `tw_server`, `tw_loadclient` (headless load client), `tw_client` (raylib demo client). Argument parsing, a clock, and a loop — no logic of their own. |
 | `scripts/` | `tw` (container invocation), `ci.sh`, `demo.sh`, `e2e-udp.sh`, toolchain/determinism verification scripts. |
 | `tests/` | GoogleTest suites, mirroring `src/` by subdirectory (`tests/net/`, `tests/server/`, `tests/client/`, ...); `tests/support/` holds fixtures shared across suites. |
-| `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness) or measurement (`bench_queue`, the queue handoff latency microbenchmark). |
+| `tools/` | Standalone executables used by tests (e.g. `digest_dump` for the determinism harness) or measurement (`bench_queue`, the queue handoff latency microbenchmark; `lagcomp_probe`, the lag-compensation on/off hit-rate matrix over demo parameters). |
 | `docs/` | Specs, phase plans, project history, and frozen format references (e.g. `wire-format.md`). |
 
 ## Verified constraints

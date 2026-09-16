@@ -1444,5 +1444,139 @@ needs no change. `net::samplePlayerAt`'s body was moved character-for-character
 out of `client::Interpolator::sample` (confirmed via diff), so no behavioral
 drift versus P4's original logic is possible.
 
-<!-- Next entries: Task 10 writeup, human-verified demo result. -->
-<!-- (P5 writeup and finishing-a-development-branch are recorded above.) -->
+## P6 demo follow-up
+
+**Finding — `tw_server --port N` bound the byte-swapped port, present since
+P2, invisible for four phases.** `apps/tw_server.cpp:139` passed the
+host-order `port` straight to `UdpTransport::bind(uint32_t addr_be, uint16_t
+port_be)`, which expects network order. `--port 41237` (0xA115) bound `5537`
+(0x15A1) instead, and `tw_server` itself printed the wrong port back. Present
+since `3b166fd` (P2, 2026-09-08). Every script and every test across P2–P6
+used `--port 0`, whose byte swap is itself `0` — the bug was invisible
+through the entire test suite and every phase's own CI run. The first fixed-
+port invocation was this follow-up's own README recipe (`--port 41234`),
+where it surfaced immediately: the client never joined, because the server
+was actually listening on a different port than the one printed. Fixed in
+`48055e3` (`fix: bind tw_server to the port it was given, not its byte
+swap`) with `htons(port)`, verified by a new `server_app_fixed_port` CTest
+that checks the server's own `getsockname()`-derived readback against the
+requested port — proving the fix, not just that binding succeeds.
+
+**Finding — the demo HUD overflowed the 800px window.** The single-line
+HUD's `lagcomp=`/`hits=` fields sat past the right edge, unreadable without
+maximizing the window. Fixed in `294ba13` by regrouping into three shorter
+`DrawText` lines.
+
+**Finding — the first human check found lagcomp on/off "very minimal, not
+very clear" by eye, tracing to hit-radius-vs-aim-error, not a toggle
+defect.** With the port bug worked around (`--port 0`), the toggle path
+itself was already verified correct by reading the code before any tuning
+changed: `Client` stamps `view_tick = 0` when off (`client.h:223`), `Server`
+rewinds and counts only when `view_tick != 0` (`server.h:127`) — confirmed
+by the server's own reported counters (see the human-verified section
+below). The problem was the demo's readability, not correctness: at the
+pre-fix zoom (8px/world-unit), the player is 8px across and the hit radius
+is 4px — roughly one dot-width of ordinary human mouse-tracking error
+already erases the statistical gap `lagcomp_hitrate_test` cleanly shows
+(100% vs 11%). `tools/lagcomp_probe` (`9bffc7e`) makes this reproducible;
+its full matrix, run inside the pinned `tickwire-dev` image (deterministic —
+reproduced bit-for-bit across two separate runs):
+
+```
+topology=test reverse_ticks=120 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.100 off_hits=15/150 gap=+0.900
+topology=demo reverse_ticks=120 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.007 off_hits=1/150 gap=+0.993
+topology=test reverse_ticks=30 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.200 off_hits=30/150 gap=+0.800
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.400 off_hits=60/150 gap=+0.600
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.25 on=0.973 on_hits=146/150 off=0.193 off_hits=29/150 gap=+0.780
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.50 on=0.687 on_hits=103/150 off=0.193 off_hits=29/150 gap=+0.493
+topology=demo reverse_ticks=30 axis=x aim_sigma=1.00 on=0.307 on_hits=46/150 off=0.233 off_hits=35/150 gap=+0.073
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.100 off_hits=15/150 gap=+0.900
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.25 on=0.980 on_hits=147/150 off=0.060 off_hits=9/150 gap=+0.920
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.50 on=0.660 on_hits=99/150 off=0.093 off_hits=14/150 gap=+0.567
+topology=demo reverse_ticks=120 axis=x aim_sigma=1.00 on=0.293 on_hits=44/150 off=0.260 off_hits=39/150 gap=+0.033
+```
+
+Reading this: at `aim_sigma=0` (perfect aim, as `lagcomp_hitrate_test`
+itself simulates), the gap is large and consistent (+0.60 to +0.99) across
+every topology/reverse-period combination — the underlying mechanism is
+sound regardless of demo tuning. As `aim_sigma` rises toward 1.0 world unit
+(roughly an unzoomed demo's typical hand error), the gap collapses toward
++0.03–+0.07 — both modes converge toward "aim error dominates, compensation
+barely matters," since random misaims land on the live target about as
+often with or without rewind. At 4× zoom, the same absolute pixel error is a
+quarter the world-unit sigma, keeping the gap large (+0.90–+0.98 at
+`aim_sigma <= 0.25`) — this is why zoom, not a slower bot alone, was the fix
+that mattered: row `demo 120 x 1.0` (gap +0.033) shows a slower reversal
+period alone does not rescue a high-aim-error regime.
+
+**Finding — nothing else Tasks 1–4 touched needed a behavioral change beyond
+what the plan specified.** `--sweep-ticks`, the `Camera`/`screenToWorld`
+mapping, and the HUD regrouping all matched their contracts on the first
+implementation pass; each checkpoint's RED step reproduced exactly what the
+plan predicted (the byte-swapped port readback, the missing flag's usage
+text, a compile error, a missing-source configure error).
+
+### Interactive feel — human-verified after phase completion
+
+Same limitation P2–P4 recorded: this session's own tools cannot watch a
+WSLg-rendered window. Verified by a human running the fixed README recipe
+(`--port 41234 --sweep-ticks 120 --latency-ms 200`, 4× zoom, three-line HUD)
+after Tasks 1–4 landed: tracking the bot for ~15 seconds in each mode
+produced **54 hits with `lagcomp=on`**, **~6 hits with `lagcomp=off`** at the
+same 200ms latency — roughly 9× — and, as an unprompted extra control,
+**~16 hits with `lagcomp=off` at 0ms latency** (less real desync to
+compensate for, so more shots land on the live target by chance alone even
+uncompensated — consistent with the mechanism, not a discrepancy). The human
+confirmed on vs. off was **clearly distinguishable by eye** this time,
+unlike the pre-fix check. The server's final line read
+`lagcomp rewound_shots=82 rewinds_rejected=0`. No visual artifacts reported:
+no HUD clipping, no camera jitter, hit ring drawn in the expected place.
+This closes P6's last outstanding item.
+
+### P6 demo follow-up security review
+
+Threat model unchanged (an unauthenticated attacker controls every byte of
+every datagram, at any rate, from any forgeable source address). Reviewed
+via the `security-reviewer` agent over
+`git diff dev...HEAD -- apps/ scripts/ tools/ src/client/view.*`.
+**No CRITICAL or HIGH findings.**
+
+**Verified closed — the `htons` fix does not widen the bind.** Only the
+port argument to `UdpTransport::bind()` changed; the address argument
+(`htonl(INADDR_LOOPBACK)`) is untouched by this diff, confirmed by
+inspecting both `apps/tw_server.cpp` and `UdpTransport::bind()`'s handling
+of each argument (`src/net/udp.cpp`) — the server still binds loopback-only.
+
+**Verified closed — `--sweep-ticks` cannot reach division-by-zero or
+signed/unsigned wraparound.** Parsed as a signed `int` first and rejected
+(`return 1`, before any socket bind) if `< 1`, which excludes zero and every
+negative value before the `static_cast<uint32_t>` conversion — no path from
+a negative CLI argument to a huge wrapped `uint32_t`. The only consumer
+(`t / sweep_ticks`) is therefore always unsigned division by a value `>= 1`.
+Purely local CLI input, never attacker-reachable over the wire.
+
+**Verified closed — `screenToWorld` cannot produce a non-finite aim from
+finite mouse input.** Its only division is by
+`scale = side / (2 * kArenaHalf) * zoom`, which resolves to a fixed
+compile-time-derived positive constant (`32.0`) at every current call
+site — `kSide`/`kZoom` are both `constexpr`, never runtime- or
+attacker-derived. Mouse coordinates come from raylib's `GetMousePosition()`,
+local-only and finite by construction.
+
+**Recorded, not fixed (LOW, explicitly out of scope per this review's own
+instructions) — every app's `--port` parses as
+`static_cast<uint16_t>(std::atoi(...))`, silently wrapping values over
+65535** (`--port 70000` binds/connects to `4464`). Pre-existing across all
+three binaries (`tw_server`, `tw_client`, `tw_loadclient`), not introduced by
+this diff. Confirmed LOW: the value is local operator-supplied CLI input,
+never crosses the network trust boundary this project's threat model is
+built around, and the truncation is well-defined `unsigned` narrowing (no
+UB) — worst case is a confusing UX failure (binds the wrong port), not a
+security bypass.
+
+**Noted, not a finding — `Camera::zoom`'s documented precondition
+(`zoom > 0` and finite) is unenforced by assertion.** Unreachable today
+(every call site passes a `constexpr`), but a future runtime- or
+config-derived zoom value would silently produce `inf`/`nan` from
+`worldToScreen`/`screenToWorld` rather than fail loudly. Defensive-
+programming nit, not exploitable under the current diff.
