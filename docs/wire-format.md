@@ -1,11 +1,13 @@
-# Tickwire Wire Format (frozen at P1, amended once at P2)
+# Tickwire Wire Format (frozen at P1, amended at P2 and P6)
 
-The wire format was frozen at P1 and amended exactly once, at P2, to add an
-aim vector to `InputCommand` (see "Version history" below). This document
-describes the current (version 2) format; the golden byte vectors in
-[`tests/net/protocol_test.cpp`](../tests/net/protocol_test.cpp) **define**
-it — if this document and that test ever disagree, the test is right and
-this document has a bug.
+The wire format was frozen at P1 and has been amended twice: at P2, to add an
+aim vector to `InputCommand`, and at P6, to add a view tick to `InputCommand`
+and a hit-confirmation message type (see "Version history" below). This
+document describes the current (version 3) format; the golden byte vectors in
+[`tests/net/protocol_test.cpp`](../tests/net/protocol_test.cpp) and
+[`tests/net/framing_test.cpp`](../tests/net/framing_test.cpp) **define** it —
+if this document and those tests ever disagree, the tests are right and this
+document has a bug.
 
 ## Endianness
 
@@ -26,7 +28,7 @@ this area — the naming is the guard, not a convention to memorize.
 
 ```
 kProtocolMagic   = 0x52495754
-kProtocolVersion = 2
+kProtocolVersion = 3
 ```
 
 `0x52495754`'s little-endian bytes are `54 57 49 52`, which read as ASCII
@@ -47,6 +49,22 @@ kProtocolVersion = 2
   the header fields P1 reserved and P2 populated (`tick`/`send_time_ms`/
   `ack_tick`) — this is the record that the reservation worked as intended.
   See `docs/project-history.md`'s P3 section.
+- **P4 (2026-09-11): no version bump, `kProtocolVersion` stays 2.** One
+  additive message type, `MsgType::kSnapshotDelta = 6`, using the extension
+  path this document already designated (`6..255` were reserved unused).
+  `ack_tick` gains a second meaning, populated by the *client* on `Input`
+  packets for the first time (previously always `0` in that direction) — see
+  the header table and the new `SnapshotDelta` payload section below. See
+  `docs/project-history.md`'s P4 section for the full design rationale.
+- **v3 (P6):** adds `InputCommand::view_tick` (25 → 29 bytes) — the tick
+  whose world the sender drew when it stamped this input, which the server's
+  rewind (`server::buildRewoundView`) needs to resolve a shot against what
+  the shooter actually saw rather than a live or derived position. Also adds
+  `MsgType::kHitConfirm = 7`, additive, using the extension path this
+  document already designated. A version-2 header is rejected outright —
+  there is no cross-version compatibility. See `docs/project-history.md`'s P6
+  section for the alternatives considered (deriving the tick server-side,
+  smuggling it into `seq`) and why they lost.
 
 ## Packet header — 24 bytes
 
@@ -55,19 +73,18 @@ Every packet on the wire starts with this header.
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | must equal `kProtocolMagic` |
-| 4 | 1 | `version` | must equal `kProtocolVersion` (2) |
+| 4 | 1 | `version` | must equal `kProtocolVersion` (3) |
 | 5 | 1 | `type` | `MsgType`; must be `1..kMaxMsgType` |
 | 6 | 2 | `payload_len` | bytes following the header; must equal the bytes actually present |
 | 8 | 4 | `tick` | sender's simulation tick — **populated at P2** on every outgoing packet. On a `Snapshot`, this doubles as P3's reconciliation acknowledgment: the server consumes inputs strictly in tick order, so a snapshot at tick `S` has consumed every input stamped `≤ S`, and the client's reconciliation replay covers only the pending inputs stamped after it |
 | 12 | 4 | `send_time_ms` | sender's monotonic ms — **populated at P2** on every outgoing packet; **consumed at P3**: the client records it per pending input and, when a later snapshot's `ack_tick` names that input, computes `now_ms - send_time_ms` as an input-to-snapshot latency estimate. This is *not* a pure network round trip — it includes however long the server's `InputBuffer` held the input before consuming it, plus the snapshot broadcast interval — so it reads roughly 50-100 ms above the wire RTT at 60 Hz and must not be labelled "ping" |
-| 16 | 4 | `ack_tick` | highest tick seen from the peer — **populated at P2**, but only by the server on `Snapshot` packets (per-recipient: each session's own highest accepted input tick); **consumed at P3**: `ack_tick - tick` on a snapshot is the depth of that session's server-side input buffer, and is the *sole* feedback signal driving the client's clock-sync controller (`client::ClockSync`) — no separate RTT measurement is taken. `ack_tick == 0` means the session has had no input accepted yet; the controller ignores such a snapshot entirely rather than reading it as an enormous negative lead |
+| 16 | 4 | `ack_tick` | highest tick seen from the peer — **populated at P2**, originally only by the server on `Snapshot` packets (per-recipient: each session's own highest accepted input tick); **consumed at P3**: `ack_tick - tick` on a snapshot is the depth of that session's server-side input buffer, and is the *sole* feedback signal driving the client's clock-sync controller (`client::ClockSync`) — no separate RTT measurement is taken. `ack_tick == 0` means the session has had no input accepted yet; the controller ignores such a snapshot entirely rather than reading it as an enormous negative lead. **Populated by the client too, at P4**: every outgoing `Input` now sets `ack_tick` to the newest snapshot tick that client holds (`0` if none yet) — this field had been reserved-but-always-zero in the client→server direction since P1. **Consumed by the server at P4**: `SessionTable::noteSnapshotAck` records it per session (monotonic — an older or implausible value, anything beyond the server's own current tick, is ignored) as the baseline a `SnapshotDelta` is cut against; `ack_tick == 0` (or a baseline that has aged out of the server's 16-snapshot history) makes the server send a full `Snapshot` instead |
 | 20 | 2 | `seq` | reliable channel sequence — **populated at P2** on the join/leave channel only (`kJoinSeq = 1`, `kLeaveSeq = 2`); zero on `Input`/`Snapshot` |
 | 22 | 2 | `ack_seq` | reliable channel ack — **populated at P2**, echoed by the server on `JoinAccept`/`Leave` replies to the request's `seq`; zero elsewhere |
 
 `MsgType`: `kInvalid = 0, kInput = 1, kSnapshot = 2, kJoinRequest = 3,
-kJoinAccept = 4, kLeave = 5`. `kMaxMsgType = 5`. Values `6..255` are unused;
-P6's hit-feedback message can be added additively without touching the
-header or bumping the version again.
+kJoinAccept = 4, kLeave = 5, kSnapshotDelta = 6, kHitConfirm = 7`.
+`kMaxMsgType = 7`. Values `8..255` are unused.
 
 **Every header field is now both populated and consumed.** P2 stamped every
 field but only fully consumed `seq`/`ack_seq` (the join/leave channel — what
@@ -78,7 +95,7 @@ sync (see the field notes above), and `send_time_ms` drives the input-to-
 snapshot latency estimate. No byte layout changed to make this happen —
 see "Version history" below.
 
-## `InputCommand` payload — 25 bytes
+## `InputCommand` payload — 29 bytes
 
 `MsgType::kInput`'s payload.
 
@@ -91,6 +108,7 @@ see "Version history" below.
 | 16 | 4 | `aim_x` (IEEE-754 binary32) — **added at v2** |
 | 20 | 4 | `aim_y` (IEEE-754 binary32) — **added at v2** |
 | 24 | 1 | `fire` |
+| 25 | 4 | `view_tick` — the tick whose world the sender drew when it sent this input; 0 = uncompensated (added at v3) |
 
 ## `JoinRequest` payload — empty
 
@@ -135,6 +153,67 @@ Each `PlayerState` record is 24 bytes: `id` (4), `x`, `y`, `vx`, `vy`,
 `radius` (4 each, IEEE-754 binary32, in that order). Slots at or beyond
 `count` are never transmitted.
 
+## `SnapshotDelta` payload — `16 + 20 × changed_count` bytes
+
+`MsgType::kSnapshotDelta`'s payload — **added at P4**. Encodes a snapshot as
+the difference against a baseline the recipient already holds, instead of
+resending every player. The server picks the baseline per session from the
+client's own acknowledgment (`ack_tick` on `Input`, see the header table
+above); a session with no usable baseline gets a full `Snapshot` instead —
+`SnapshotDelta` is an optimization layered over the existing message, never a
+replacement for it.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | `tick` — this delta's own tick, same meaning as `WorldSnapshot::tick` |
+| 4 | 4 | `baseline_tick` — the tick of the snapshot this delta is cut against |
+| 8 | 4 | `present_mask` — bit `(id - 1)` set: player `id` is present in this snapshot |
+| 12 | 4 | `changed_mask` — bit `(id - 1)` set: a 20-byte record for `id` follows; else the recipient copies `id`'s record from its own baseline |
+| 16 | 20 × `popcount(changed_mask)` | records for exactly the ids whose `changed_mask` bit is set, ascending by id: `x`, `y`, `vx`, `vy`, `radius` (IEEE-754 binary32, in that order — `id` itself is not on the wire; it is recovered from the bit position) |
+
+Both masks are 32-bit, one bit per id, which is exactly `kMaxPlayers` — the
+codec's `static_assert(sim::kMaxPlayers == 32, ...)` in
+[`src/net/snapshot_delta.h`](../src/net/snapshot_delta.h) is what keeps this
+true if that constant ever changes.
+
+**Invariants a decoder enforces, not just documents:**
+
+- `changed_mask` is always a subset of `present_mask`
+  (`changed_mask & ~present_mask == 0`) — a record for a player the sender
+  simultaneously claims is absent is incoherent and rejected.
+- A player present in `current` but **absent from the baseline** (joined
+  since, or a reused session slot) always has its `changed_mask` bit set —
+  there is no baseline record to diff against, so it is always sent in full.
+  A player **absent from `current`** (left since the baseline) has neither
+  bit set: reconstructing drops it, driven by `present_mask` alone, never by
+  iterating the baseline's own player list.
+- `radius` travels in every sent record, even though it is always
+  `sim::kPlayerRadius` today. The architecture-resolution doc names `radius`
+  as "the first field to drop from a delta"; this format deliberately keeps
+  it instead, in exchange for the stronger property that **a delta applied to
+  its baseline reconstructs the full snapshot of the same tick, field for
+  field** — no special-casing a joined-since-baseline player's radius. See
+  `docs/project-history.md`'s P4 section for the full reasoning.
+- A player unchanged since the baseline (all five fields compare `==`) costs
+  zero bytes: no bit in `changed_mask`, no record.
+
+## `HitConfirm` payload — 8 bytes
+
+`MsgType::kHitConfirm`'s payload — **added at P6**. Sent server → shooter
+only, never broadcast, in reply to a fire that resolved a hit (compensated or
+not). Not a reliable channel: at most one per hit, no retransmit or ack.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | `target_id` — the player hit; never `0` (`kInvalidPlayerId` is rejected on both the encode and decode side) |
+| 4 | 4 | `fire_tick` — echoes the `InputCommand::tick` of the shot that hit |
+
+The header's own `tick` on this packet is the *server's* tick the hit
+resolved on (i.e. `Server::tick()`'s current tick when pass 2 ran), not
+`fire_tick` — the two differ whenever the shot was buffered before being
+consumed, the same tick-vs-buffering distinction every other message type
+already draws.
+
 ## Maximum packet size
 
 ```
@@ -145,6 +224,30 @@ kHeaderBytes (24) + kSnapshotFixedBytes (8) + kMaxPlayers (32) × kPlayerStateBy
 `kMaxPlayers = 32` is the current ceiling on a single full snapshot. Room
 between 800 and the 1200-byte MTU-safe ceiling is deliberate: P4's snapshot
 delta compression is what spends it, not a larger `kMaxPlayers`.
+
+**P4's delta, worst case (every player changed):**
+
+```
+kHeaderBytes (24) + kSnapshotDeltaFixedBytes (16) + kMaxPlayers (32) × kDeltaRecordBytes (20)
+  = 24 + 16 + 640 = 680 ≤ kMaxPacket (1200)
+```
+
+That is still smaller than a full snapshot (800 B) even in the pathological
+case where every player moved. The headroom this buys, expressed as "how
+many players fit under the 1200 B MTU ceiling":
+
+| Encoding | Payload | On the wire (+24 B header) | Max players |
+|---|---|---|---:|
+| Full snapshot | `8 + 24N` | `32 + 24N` | **48** |
+| Delta, worst case (every player changed) | `16 + 20N` | `40 + 20N` | **58** |
+
+At today's `kMaxPlayers = 32`: an all-changed delta is 680 B against a full
+snapshot's 800 B (a 15% reduction even in the worst case), and a delta with
+only a couple of movers is under 100 B — see `docs/project-history.md`'s P4
+section for byte counts measured from an actual `tw_server` run.
+`kMaxPlayers` itself stays at 32 this phase — P4 measures the headroom
+delta buys rather than spending it; raising the ceiling is P5's concern,
+where it can be load-tested rather than asserted.
 
 ## Decoder strictness
 
@@ -157,7 +260,7 @@ Every decoder rejects malformed input rather than normalizing it:
   clamped. Clamping would leave `out.count` describing more players than were
   filled, which is the same out-of-bounds read one level up in the caller.
 - A payload longer or shorter than its declared framing (`InputCommand`'s
-  fixed 25 bytes; `WorldSnapshot`'s `count × 24` bytes; `JoinAccept`'s fixed
+  fixed 29 bytes; `WorldSnapshot`'s `count × 24` bytes; `JoinAccept`'s fixed
   4 bytes) — rejected.
 - A non-finite (`NaN`/`Infinity`) float in any `move_x`/`move_y`/`aim_x`/
   `aim_y` or `PlayerState` field — rejected. An unauthenticated sender can
@@ -169,10 +272,27 @@ Every decoder rejects malformed input rather than normalizing it:
   `docs/project-history.md`'s P2 security review section.
 - A `JoinAccept` carrying `player_id == 0` (`kInvalidPlayerId`) — rejected on
   both the encode and decode side; `0` never travels as an accepted id.
+- **`HitConfirm` (added at P6):** the same `target_id == 0` rejection as
+  `JoinAccept`, on both the encode and decode side, and the same strict
+  8-byte framing rule as every other fixed-size payload.
+- **`SnapshotDelta` (added at P4):** a `changed_mask` bit not present in
+  `present_mask` — rejected (a record for a player simultaneously claimed
+  absent is incoherent). A payload whose length disagrees with
+  `16 + 20 × popcount(changed_mask)`, whether too few bytes (truncated) or
+  too many (trailing bytes) — rejected, the same "declared framing must
+  match the bytes present" rule `WorldSnapshot`'s `count × 24` already
+  enforces. A non-finite float in any record field — rejected, same
+  reasoning as `WorldSnapshot`'s records above.
 
 **The one documented exception is `InputCommand::fire`**, decoded as `u8 !=
 0` rather than requiring exactly `0` or `1`. A `bool` has no invalid bit
 pattern to exploit, so strictness there buys nothing.
+
+**`InputCommand::view_tick` is not range-checked by the codec** (added at
+v3). Any `uint32_t` value decodes successfully — its plausibility depends on
+session state the codec has no access to (how far behind the shooter's
+acknowledged snapshot it is, how far behind the fire tick), which only the
+server can judge, in `server::buildRewoundView`.
 
 On rejection, a decoder never partially populates the caller's output
 struct — it is assigned only once every check has passed.
@@ -182,9 +302,10 @@ struct — it is assigned only once every check has passed.
 The layouts above, including every byte offset, are pinned by golden byte
 vectors and exhaustive rejection-case tests in
 [`tests/net/protocol_test.cpp`](../tests/net/protocol_test.cpp) (header,
-`InputCommand`, `WorldSnapshot`) and
+`InputCommand`, `WorldSnapshot`),
 [`tests/net/framing_test.cpp`](../tests/net/framing_test.cpp) (`JoinAccept`,
-and `net::framePacket` — the header-plus-payload assembly every sender uses).
-Malformed-input robustness (truncation sweeps and a 20,000-trial random-byte
-fuzz corpus) lives in
+and `net::framePacket` — the header-plus-payload assembly every sender uses),
+and [`tests/net/snapshot_delta_test.cpp`](../tests/net/snapshot_delta_test.cpp)
+(`SnapshotDelta`, added at P4). Malformed-input robustness (truncation sweeps
+and 20,000-trial random-byte fuzz corpora, one per payload type) lives in
 [`tests/net/robustness_test.cpp`](../tests/net/robustness_test.cpp).

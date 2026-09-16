@@ -29,6 +29,7 @@ struct InputCommand {
   float move_x, move_y;
   float aim_x, aim_y;
   bool fire;
+  uint32_t view_tick = 0;  // tick whose world the sender drew; 0 = uncompensated (v3)
 };
 
 struct WorldSnapshot {

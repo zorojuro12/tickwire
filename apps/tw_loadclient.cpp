@@ -18,7 +18,8 @@ namespace {
 
 void printUsage() {
   std::fprintf(stderr,
-                "usage: tw_loadclient --host <ip> --port <n> [--players <n>] [--ticks <n>]\n");
+                "usage: tw_loadclient --host <ip> --port <n> [--players <n>] [--ticks <n>] "
+                "[--sweep-ticks <n>]\n");
 }
 
 void sleepMs(int ms) {
@@ -35,6 +36,7 @@ int main(int argc, char** argv) {
   uint16_t port = 0;
   uint32_t players = 1;
   uint32_t ticks = 600;
+  uint32_t sweep_ticks = 30;
   bool have_port = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -48,6 +50,13 @@ int main(int argc, char** argv) {
       players = static_cast<uint32_t>(std::atoi(argv[++i]));
     } else if (arg == "--ticks" && i + 1 < argc) {
       ticks = static_cast<uint32_t>(std::atoi(argv[++i]));
+    } else if (arg == "--sweep-ticks" && i + 1 < argc) {
+      const int parsed = std::atoi(argv[++i]);
+      if (parsed < 1) {
+        std::fprintf(stderr, "tw_loadclient: --sweep-ticks must be >= 1\n");
+        return 1;
+      }
+      sweep_ticks = static_cast<uint32_t>(parsed);
     } else {
       printUsage();
       return 1;
@@ -90,7 +99,7 @@ int main(int argc, char** argv) {
       client::Client<net::UdpTransport>& c = *clients[i];
       c.tick(now_ms);
       if (c.state() == client::State::kJoined) {
-        const float move_x = ((t / 30 + i) % 2 == 0) ? 1.0f : -1.0f;
+        const float move_x = ((t / sweep_ticks + i) % 2 == 0) ? 1.0f : -1.0f;
         c.sendInput(now_ms, move_x, 0.0f, 0.0f, 0.0f, false);
       }
     }
@@ -115,9 +124,11 @@ int main(int argc, char** argv) {
   for (uint32_t i = 0; i < players; ++i) {
     const client::Client<net::UdpTransport>& c = *clients[i];
     std::printf(
-        "player=%u rtt_ms=%u lead=%d pred_p50=%.2f pred_p99=%.2f pred_worst=%.2f snaps=%u\n",
+        "player=%u rtt_ms=%u lead=%d pred_p50=%.2f pred_p99=%.2f pred_worst=%.2f snaps=%u "
+        "deltas_applied=%u deltas_dropped=%u\n",
         c.playerId(), c.rttMs(), c.clockLead(), c.predictionError().p50(),
-        c.predictionError().p99(), c.predictionError().worst(), c.clockSnaps());
+        c.predictionError().p99(), c.predictionError().worst(), c.clockSnaps(),
+        c.deltasApplied(), c.deltasDropped());
   }
   std::fflush(stdout);
 

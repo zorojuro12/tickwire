@@ -697,6 +697,886 @@ movement parameters, never from `predicted_`'s own state. This is the same
 distinction P2 recorded, now confirmed rather than waved at across a rewrite
 of the surrounding code.
 
+### Interactive feel — human-verified after phase completion
+
+The phase's own execution session could smoke-test the GUI (windows open,
+render, close without crashing) but explicitly could not judge whether
+prediction's effect *looked* convincing — the sessions have no tool to watch
+a WSLg-rendered window. Verified afterward by a human running the actual
+demo (`tw_server` + `tw_client --latency-ms 200` inside one container, so
+both share a network namespace over loopback): with `pred=on` (green)
+movement tracked input essentially instantly; toggling `pred=off` (yellow)
+mid-movement introduced an obvious, described-as-"low frame rate" lag
+matching the 200ms round trip; `[`/`]` visibly changed the HUD's `latency=`
+value at runtime. Confirms the design doc's headline prediction claim and
+closes the last item P2 and P3 both deferred to a human.
+
 ---
 
-<!-- Next section: ## P4 — Entity interpolation, snapshot delta -->
+## P4 — Entity interpolation, snapshot delta
+
+**Decision 1 — a new message type, not a format version bump.**
+`kSnapshotDelta = 6`, `kMaxMsgType` 5 → 6. `docs/wire-format.md` already
+designated `6..255` as the additive-extension path, so `kProtocolVersion`
+stays **2**. Full `kSnapshot` packets remain the keyframe every session
+starts on and the fallback whenever a delta can't be cut — delta is an
+optimization layered over the existing message, never a replacement for it.
+
+**Decision 2 — the delta baseline is acknowledged through `ack_tick`, which
+costs zero new bytes.** `PacketHeader::ack_tick` had been populated only by
+the server, on `Snapshot` packets, since P2; on client→server `Input` packets
+it had always been the reserved-but-unused default `0` since P1. The client
+now sets `ack_tick = latest_snapshot_tick_` on every input, and the server
+records it per session. The same story P1's reservation told at P3 repeats
+here: a field that was already there turns out to be exactly the channel a
+later phase needed, with no wire-format reopening required.
+
+**Decision 3 — a deliberate deviation from the architecture-resolution doc:
+unchanged players cost zero bytes, but `radius` stays in the records that are
+sent.** The resolution doc names `radius` as *"the first field to drop from a
+delta"* (it is `sim::kPlayerRadius` for every player, always, so it never
+carries information). This plan does something strictly better instead:
+drops the **entire 24-byte record** for every *unchanged* player, while
+keeping `radius` inside the 20-byte records that *are* sent. Dropping
+`radius` from a sent record would save 4 bytes but forces a baseline lookup
+(or a hardcoded `sim::kPlayerRadius` in the wire decoder) for a player who
+has no baseline entry — i.e. one who joined since the baseline — turning that
+case into a variable-size record or a decoder special case, for 4 bytes.
+Keeping it buys the property Task 2 Checkpoint 5 exists to prove: **a delta
+applied to its baseline reconstructs a `WorldSnapshot` field-for-field
+identical to the full snapshot of the same tick.** Worth far more than the
+bytes, and it's what let `applySnapshotDelta`'s reconstruction loop stay a
+single, uniform walk over `present_mask` with no per-field special case.
+
+**Decision 4 — the interpolation timeline is its own controller
+(`client::Interpolator`), not `clockLead()`.** The obvious shortcut —
+render at `tick_ - clockLead() - delay` — was rejected: `clockLead()` is
+documented as a stale, round-trip-old value, and P3's own convergence work
+found it reports a materially different number from the true gap. Feeding a
+noisy estimate into the render path would reintroduce the jitter this phase
+exists to remove. `Interpolator` instead holds a `render_tick_` advanced one
+tick per client tick and corrected toward
+`newest_snapshot_tick - kInterpDelayTicks` on each snapshot — and,
+unlike `ClockSync`, needs **no EMA and no cooldown**: `ClockSync` closes a
+loop over substantial dead time (it observes the delayed effect of its own
+past corrections, which is what produced the *growing* oscillation P3's
+history records), whereas `Interpolator` observes the snapshot tick directly
+and its own correction has no influence on that signal at all. A plain
+snap-or-nudge is both sufficient and correct here — confirmed, not just
+theorized: `interpolation_test.cpp`'s five checkpoints never needed either
+mechanism to pass.
+
+**Decision 5 — no extrapolation on starvation; remote players freeze at the
+newest known position instead.** Extrapolation guesses a velocity-projected
+position that must later be visibly retracted — the classic way a 50 ms gap
+becomes a 200 ms rubber-band. `kInterpDelayTicks = 6` (two full snapshot
+intervals, 100 ms) exists specifically to make the starvation path rare;
+freezing for the ~50 ms until the next snapshot is the better artifact on the
+occasions it isn't.
+
+**Decision 6 — `kMaxPlayers` stays at 32 this phase.** Delta's justification
+is headroom, and this phase *measures* the headroom rather than spending it.
+The worst-case player-ceiling arithmetic (`docs/wire-format.md`'s "Maximum
+packet size" section has the full derivation):
+
+| Encoding | On the wire (+24 B header) | Max players under 1200 B |
+|---|---|---:|
+| Full snapshot | `32 + 24N` | **48** |
+| Delta, worst case (every player changed) | `40 + 20N` | **58** |
+
+**Measured byte savings, from a real `tw_server` run** (8 players, all
+continuously moving via `tw_loadclient`'s default alternating-direction
+pattern — every player changes on nearly every broadcast, so this is close
+to delta's *worst realistic case*, not the favorable few-movers one):
+`snapshot_bytes=140992 full_equiv_bytes=160000 deltas=792 keyframes=8` over a
+300-tick run. That's an **11.9% reduction even when every player is moving
+every tick** (792 delta packets averaging 176 B against a full snapshot's
+200 B for 8 players — exactly `16 + 8×20` vs `8 + 8×24`, matching the wire
+format's byte accounting exactly). The 8 keyframes are the one-per-player
+initial join cost; every broadcast after that was a delta. The
+favorable-case number the design doc's headline claims (a two-mover delta
+against a 32-player full snapshot, ~90% smaller) is the wire-format doc's
+own worked example, not separately re-measured here — this run's point is
+that the *worst* realistic case still saves meaningfully, which the
+favorable case was never in question for.
+
+### What execution discovered that the plan didn't anticipate
+
+**A cross-checkpoint coupling the plan's own checkpoint-scoped verification
+didn't catch until it ran.** Task 5 (server broadcasts deltas) already made
+the server delta-capable; Task 6 Checkpoint 1 (client sends a real `ack_tick`)
+is what first gives the server a session willing to receive one. The moment
+that checkpoint's client-side change landed, the server started actually
+sending `kSnapshotDelta` packets to it — but the client couldn't decode that
+message type until Checkpoint 2, landing next. Checkpoint 1's own prescribed
+verification command (`ctest -R client_test`, the whole file) transiently
+failed on the pre-existing `ClientAndServerConvergeInMemory` integration
+test as a result — a real, if temporary, regression the plan's per-checkpoint
+structure didn't flag as a risk. Resolved by verifying Checkpoint 1's own new
+test in isolation (documented in that commit), then closing the gap
+immediately with Checkpoint 2 (the very next commit), after which the full
+target was green again. `ClientAndServerConvergeInMemory` also needed its own
+assertion fixed afterward: `snapshotsReceived()` alone (full snapshots only)
+undercounts once most broadcasts become deltas, so it now asserts
+`snapshotsReceived() + deltasApplied()`.
+
+**The `robustness_test.cpp` fixed-seed fuzz sweep broke again, same class of
+finding as P1 and P2.** Widening `kMaxMsgType` from 5 to 6 (Task 2 Checkpoint
+1) shifted the RNG draw sequence in `RandomByteBuffersNeverCrashADecoder`
+(`1 + rng() % kMaxMsgType` draws a different value and shifts every later
+draw), so the seed already in place — itself a prior substitution, recorded
+in this same doc's P1 section — stopped producing any payload-shaped hit in
+20,000 trials. Re-searched against the real decoders; seed `2` (recorded in
+the test's own comment, now naming all three seeds this sweep has needed and
+why each stopped working) reliably hits again. Same escape hatch the plan
+already authorizes elsewhere in this task: a fixed seed is for
+reproducibility, not sacred.
+
+**A stuck WSLg-forwarded GUI process survives closing the terminal that
+launched it, and neither Ctrl+C nor Windows Task Manager can reach it.**
+Discovered live during the human verification below: resizing a `tw_client`
+window mid-run froze it, and the user's terminal, Ctrl+C, and Task Manager
+were all unable to stop it. The process is running inside the
+`tickwire-dev` container's own PID namespace under WSL2, not as a native
+Windows process — invisible to Task Manager and unreachable by a signal sent
+to the (now-closed) terminal that launched `scripts/tw`. `docker ps -a`
+from any WSL shell found it immediately (still `Up`, an orphaned
+`scripts/tw` invocation), and `docker stop <name>` reached it directly and
+succeeded (the container was run with `--rm`, so it also self-removed).
+Recorded here since P2 and P3's GUI verification sessions never hit this —
+P2/P3's smoke runs didn't resize the window mid-session.
+
+### Task 10 boundary — mandatory security review findings
+
+Threat model (unchanged from P1/P2/P3): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/net/snapshot_delta.{h,cpp}`,
+`src/net/snapshot_ring.{h,cpp}`, `src/client/interpolation.{h,cpp}`, and the
+P4 diffs to `src/server/server.h`, `src/server/session.{h,cpp}` and
+`src/client/client.h`. No CRITICAL or HIGH findings; every MEDIUM and the
+cheap LOW findings were fixed, all without touching the wire format.
+
+**Fixed (MEDIUM, found independently by both agents) — a latent
+out-of-bounds read in `decodeSnapshotDelta`, dormant only because
+`sim::kMaxPlayers` happens to equal 32.** `record_count` is a `popcount` over
+the *full* 32-bit `changed_mask` read off the wire, but the fill loop that
+actually populates `SnapshotDelta::records` (sized `sim::kMaxPlayers`) only
+walks `id = 1..kMaxPlayers`. The two bounds agree today purely because a
+`uint32_t` mask and `kMaxPlayers == 32` happen to have the same width — if
+`kMaxPlayers` is ever changed, the finiteness-validation loop
+(`for (i = 0; i < record_count; ++i) records[i]`) would read past the end of
+the array for any attacker-set high mask bit, with nothing rejecting it.
+Not reachable today (there is no 33rd bit in a `uint32_t` to trigger it, so
+no RED/GREEN runtime test was possible). Fixed with a `static_assert` in
+`src/net/snapshot_delta.h` pinning `kMaxPlayers == 32` at the exact spot the
+masks are defined, converting a future silent landmine into a compile
+error — the same treatment `docs/wire-format.md`'s and `protocol.h`'s own
+wire-size invariants already get.
+
+**Fixed (MEDIUM) — an unbounded `ack_tick` could permanently pin a session to
+full keyframes.** `SessionTable::noteSnapshotAck` only ever moves
+`acked_snapshot_tick` forward, and `ack_tick` is raw, unvalidated data on
+every authorized `Input` packet. A single bogus large value (accidental —
+one dropped/reordered write on a buggy client — or deliberate) sticks
+permanently: every subsequent genuine, smaller `ack_tick` is then rejected as
+"older" by the same monotonicity the P4 plan itself added for a different
+reason (Task 4 Checkpoint 2). Blast radius is confined to the offending
+session's own bandwidth, not an amplification or DoS against the server or
+other sessions — this is a correctness/self-harm gap, not the kind of
+attacker-vs-victim finding P1/P2 recorded. Fixed in `Server::handleInput`
+(`src/server/server.h`): a legitimate client can only ack a tick the server
+already sent, which is always `<= world_.tick()`, so anything larger is
+rejected outright rather than recorded.
+
+**Fixed (MEDIUM) — a snapshot's payload-embedded tick was never checked
+against its header tick, and P4 is what first makes that field load-bearing.**
+`Client::acceptSnapshot`'s freshness gate checks `h.tick`, but stores and
+*keys* the `SnapshotRing` entry by the payload's own `snap.tick` — nothing
+validated the two agree. Pre-P4 the payload tick was a display value only;
+P4 turns it into a lookup key (`SnapshotRing::find`, a delta's
+`baseline_tick`), so a decoupled pair now corrupts that keying. Only
+reachable by forging the joined server's source address — the same
+precondition P3's review already accepted the client has no defense
+against — but the blast radius is new to this phase, and the fix is a
+one-line rejection (`snap.tick != h.tick`) regardless of precondition, so it
+was closed rather than waved at. This also subsumes a separately-flagged LOW
+finding (an unchecked `d.tick <= d.baseline_tick` on the wire): once
+`snap.tick` must equal the already-monotonic `h.tick`, a `d.tick` that
+doesn't advance sensibly can no longer pass the freshness gate at all.
+
+**Fixed (LOW, found independently by both agents) — `deltas_dropped_`
+undercounted.** Incremented only when the baseline lookup itself missed, not
+when a found baseline still made `applySnapshotDelta` fail (the
+"present-but-unchanged and absent from baseline" case). Not a safety issue —
+the world was already correctly left untouched either way — but the counter
+under-reported actual drops. Fixed by incrementing it on both early-return
+paths in `Client::handleSnapshotDelta`.
+
+**Fixed (LOW, style) — `__builtin_popcount` replaced with `std::popcount`**
+(`<bit>`, C++20, available on GCC 10 unlike `std::bit_cast`) in both
+`snapshot_delta.cpp` and its robustness-sweep test, per the cpp-reviewer's
+idiom note — a GCC/Clang extension where a standard equivalent exists and
+the toolchain supports it.
+
+**Verified, no fix needed — every other question the plan posed.** A crafted
+mask cannot escape `present_mask` (`decodeSnapshotDelta` already rejects
+`changed_mask & ~present_mask`, from Task 3); a forged `ack_tick` cannot move
+*another* session's baseline (`noteSnapshotAck` is keyed by the sender's own
+endpoint, reached only after `authorize()`); `applySnapshotDelta` and
+`decodeSnapshotDelta` both build into a fully local value and assign to the
+caller's output only on the single success path, never partially populating
+it on any rejection; non-finite floats are rejected in delta records the same
+way `decodeSnapshot` already rejects them in full records; the P3-established
+`slot.peer != server_` guard in `Client::handlePacket` covers the new
+`kSnapshotDelta` case with no exception; neither `SnapshotRing` has an
+unbounded-growth path (both are fixed `std::array`s with round-robin
+overwrite); and the three P1/P2 CRITICAL findings (spoofable session
+authorization, join/snapshot amplification, session-table exhaustion) are
+unaffected by this phase's changes — re-checked against the actual diff, not
+assumed, per the standard P3's review established.
+
+### Interactive feel — human-verified after phase completion
+
+Same limitation P2 and P3 both recorded: the phase's own execution session
+could smoke-test the GUI build and a headless server+client run, but could
+not judge whether interpolation *looked* smooth — no session tool can watch
+a WSLg-rendered window. Verified afterward by a human running two `tw_client`
+instances against one `tw_server` at 150 ms simulated latency, one player
+moving and watched from the other window: with interpolation on, the remote
+player's movement appeared as a smooth glide (red circle); pressing `I` to
+disable it switched the same remote player to visibly stepping at the 20 Hz
+snapshot rate (orange circle) instead. Matches the design's claim exactly —
+confirmed by direct comparison of the same player under both states, not
+just "it looked fine." Closes Task 9 Checkpoint 3's outstanding item.
+
+---
+
+## P5 — Threading, queue benchmark
+
+**Finding — the phase-by-phase skill import map was built from a name
+inventory, and three of its four remaining rows were wrong.** `docs/dev-workflow-guide.md`
+§3a was cross-referenced against `~/projects/ecc-survey.md`'s three-bucket
+inventory, which lists skill *names* and bucket numbers; no `SKILL.md` was ever
+opened while writing the table. P5's row was the map's own self-described
+"clearest concrete gap in the whole map," naming three skills to import at the
+start of this phase. Reading them at the trigger point:
+
+- **`benchmark-methodology` is competitive *marketing* analysis, not
+  performance work.** Its description: *"Use after
+  `competitive-platform-analysis` has produced a tiered competitor set. Scores
+  each competitor across nine weighted dimensions (positioning, voice, visual
+  craft, offer packaging, evidence, enterprise-readiness, ...)"* — it sits
+  between two other marketing skills in a content pipeline. It matched P5 on
+  the word "benchmark" and nothing else.
+- **`benchmark` is web/cloud-only.** All four modes: Core Web Vitals via
+  browser MCP, HTTP endpoint p50/p95/p99, JS/TS/Docker build times, and a
+  before/after page-weight table. Nothing addresses an in-process 60 Hz tick
+  loop or a queue handoff.
+- **`benchmark-optimization-loop` is the real fit, and was imported** — the one
+  of the three that is stack-agnostic. Its required-baseline checklist
+  (operation, correctness gate, metric, current baseline, **search budget**),
+  variant table, and promotion gate ("the delta is repeated or explained";
+  "best measured safe variant," never "global optimum") map onto P5 directly:
+  operation = the queue handoff, correctness gate = the existing three
+  sanitizer configs, metric = handoff latency plus tick-jitter percentiles,
+  variants = `PacketRing`'s mutex path vs the lock-free `SpscRing`.
+- **`latency-critical-systems` was not in the table at all and was evaluated
+  anyway**, since its description (p95 latency, hot paths, queues) reads like a
+  direct hit. Rejected: its hot-path model is `provider API → ingest worker →
+  queue → cache → edge route → browser render` and its optimization order is
+  about round trips and cache freshness. Only its "Split The Metrics" list
+  transfers, and the design doc already fixes Tickwire's four metrics.
+
+Two further rows were closed rather than imported. The **`security-scan` skill**
+row asserted a distinction that does not exist — it claimed the skill audits
+`.claude/` config while the already-installed `/security-scan` command audits
+code; the command's own frontmatter reads *"Run AgentShield against agent, hook,
+MCP, permission, and secret surfaces"* and shells out to the same
+`npx ecc-agentshield scan` engine, so importing the skill is pure redundancy.
+The **`documentation-lookup`/`docs-lookup`** row's trigger genuinely fired at P2
+(raylib) and was missed then, but both are inert: no Context7 MCP server is
+configured (global and project `mcpServers` are both empty) and that MCP is the
+skill's entire mechanism, raylib integration is complete, and no P5–P7 phase
+adds an external library. `docker-patterns` is the one row correctly still
+pending — its trigger is a *shipped* container, and the `Dockerfile` remains a
+dev-toolchain image.
+
+**The hazard, stated for transfer:** *an import map built from a name inventory
+recommends tools that don't do what their names imply, and the cost is paid at
+the phase that depends on them — the one point where there's no slack to
+re-plan.* This is the same class as the false-green rule P4 recorded: a step
+that reports success without having done the thing it claims. A survey tells
+you what **exists**; it never tells you whether it **applies**. Carrying an
+import map into another project means re-reading each candidate's actual
+description at import time, not trusting the row.
+
+Also corrected while in the file: §2's status block still read *"`/impl-plan`
+has NOT been run for Tickwire"* — written before P0 and stale since, given
+`docs/specs/2026-09-04-architecture-resolution.md` exists and `CLAUDE.md` names
+it authoritative for every architectural decision. Left uncorrected it would
+tell a cold planning session to run the architectural layer again at P5, which
+is exactly what §2 itself warns against.
+
+**Decision — the ring became a template parameter on `Server`, defaulted to
+the existing `PacketRing`.** Every existing `Server<T>` spelling compiles
+unchanged; `Server<T, Ring = PacketRing<...>>` lets `MutexRing` and `SpscRing`
+substitute in at the same seam, verified behavior-preserving (not just
+compiling) by driving the existing join/input path against
+`Server<LoopbackTransport, SpscRing<...>>` in Task 6.
+
+**Decision — the transport is shared between the I/O and sim threads without
+a mutex, verified against the real implementation rather than assumed from
+the Transport concept.** `UdpTransport::send()`/`tryReceive()`
+(`src/net/udp.cpp`) touch only the socket fd and mutate no shared member
+state, and POSIX guarantees concurrent `sendto`/`recvfrom` on one fd. Adding a
+transport mutex would have serialized the two threads and made the benchmark
+measure lock contention on the wrong thing. `ring_` is the only genuinely
+shared mutable state between the two threads; every other `Server` member
+(`world_`, `sessions_`, `inputs_`, every tick-side counter) is touched only by
+the calling (sim) thread, and `ingest_overflows_`/`packets_ingested_` are
+written only by the I/O thread and read only after both threads join.
+
+**Decision — no egress queue, per the design doc's standing instruction.**
+Egress stays `sendto`-per-packet on the sim thread regardless of ring choice
+or `recvmmsg` adoption; nothing measured this phase produced a number that
+would justify one.
+
+**Decision — `recvmmsg` batching is built but not adopted as the default.**
+Task 10 built `UdpTransport::receiveBatch()` and `Server::ingestBatch()` as a
+measured, opt-in `--batch-ingest` variant. Task 11's Group 4 measurement
+(19,044 vs. 19,129 `packets_ingested` over an identical 600-tick, 32-player
+run — under 0.5% apart) showed no measurable win at Tickwire's actual load,
+so the unbatched `tryReceive()` path remains the default per the
+`benchmark-optimization-loop` skill's promotion gate ("adopt only if it
+measurably wins here"). Full numbers and interpretation in
+`docs/benchmarks.md`.
+
+**Finding — the design doc's "concurrent players before jitter exceeds
+budget" row has no answer within `sim::kMaxPlayers`, exactly as the planning
+session's self-review predicted before any number was measured.** Group 1's
+p99 sits at essentially the same ~17.0 ms from 1 to 32 players, no visible
+trend. The real jitter cliff (found via Group 2's synthetic `--sim-load-us`
+knob, since player count alone can't reach it) sits between 16 ms and 18 ms
+of added per-tick work. Full tables in `docs/benchmarks.md`.
+
+**Finding — lock-free measurably beats mutex at every rate tested, but the
+gap is three-plus orders of magnitude too small to matter at Tickwire's real
+640 packets/sec.** This is a more precise statement than the plan's own
+predicted "indistinguishable at real load" — spsc's real-load p50/p99 (500 ns
+/ 4,101 ns) are genuinely, repeatably lower than mutex's (800 ns / 5,300 ns),
+not noise, but the absolute gap (hundreds of nanoseconds) against a
+16,666,667 ns tick budget has no practical consequence for this project. The
+plan's Global Constraints treat this as the intended outcome, and it's
+reported as measured rather than rounded off to match the prediction exactly.
+
+**Finding — a cross-core `CLOCK_MONOTONIC` read can show a sub-microsecond
+apparent inversion on this project's WSL2 development environment, discovered
+by `scripts/bench.sh` dogfooding itself before the real measurement run.**
+`tools/bench_queue.cpp`'s handoff-latency measurement originally computed
+`now_ns - stamp` as unsigned subtraction across the producer/consumer thread
+pair; a tiny real (not logic-bug) cross-core clock skew wrapped this to a
+value near `2^64`, poisoning every percentile in the affected run. Not a ring
+defect — `SpscRing`'s own TSan-verified ordering tests (Task 4) are
+unaffected; monotonicity is a per-thread guarantee, not a cross-core one, and
+virtualized environments are exactly where this shows up. Fixed by computing
+the delta in `int64_t` and clamping negative results to zero.
+
+### Task 12 boundary — mandatory security review findings
+
+Threat model (unchanged from P1–P4): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/server/spsc_ring.h`,
+`src/server/mutex_ring.h`, `src/server/threaded_runner.h`,
+`src/server/jitter_stats.h`, the P5 diffs to `src/net/udp.{h,cpp}` and
+`src/server/server.h`, `tools/bench_queue.cpp`, and `apps/tw_server.cpp`.
+
+**Fixed (CRITICAL, found by `cpp-reviewer`) — `receiveBatch()` misattributed
+payload bytes to the wrong sender/length when a batch mixed an oversized
+datagram with valid ones.** `recvmmsg` writes message `i`'s payload into
+`slots[i].data` (that's what `iovs[i]` pointed at), but the metadata-
+compaction loop wrote message `i`'s length and sender into `slots[filled]`
+without moving the bytes. Once an earlier message in the same `recvmmsg` call
+was skipped as oversized (`filled < i` from then on), every later accepted
+slot reported a length and sender that belonged to message `i`, paired with
+payload bytes that actually belonged to an earlier, different message — a
+real sender/length misattribution one layer downstream in
+`Server::route()`/`SessionTable::authorize()`, which trusts `slot.peer`
+unconditionally. Reachable via `tw_server --threads 2 --batch-ingest` against
+any traffic mix containing an oversized datagram. Not caught by Task 10's own
+`ReceiveBatchFillsSeveralSlotsInOneCall` test, which only ever sent uniform
+valid packets with nothing to skip. Fixed by `memcpy`-ing the payload
+alongside the metadata whenever `filled != i`. New regression test
+(`ReceiveBatchKeepsPayloadAndMetadataPairedAcrossASkippedDatagram`) sends
+valid-oversized-valid in one batch and asserts both accepted slots' payload
+and metadata are correctly paired; verified RED (mismatched payload) with the
+fix reverted, GREEN restored.
+
+**Fixed (MEDIUM, found by `cpp-reviewer`) — `tw_server`'s SIGINT stop flag had
+no cross-thread visibility guarantee.** `g_stop` was a plain
+`volatile std::sig_atomic_t`, whose standard guarantee covers only a signal
+interrupting execution on the *same* thread that later reads it — no
+cross-thread visibility or ordering. The `--threads 2` path has the SIGINT
+handler write it while a separate polling thread (in `runThreaded()`) reads
+it, exactly the uncovered case. Switched to `std::atomic<int>` with relaxed
+ops (`static_assert`-pinned as always-lock-free — a lock-free atomic is
+explicitly permitted from a signal handler). Not independently regression-
+tested: the race is a memory-model technicality that won't misbehave in
+practice on x86-64/Linux, the same treatment P3's `ClockSync::lead_`
+truncation and the `static_assert` fix in P4 both received for a real but not
+independently observable defect.
+
+**Fixed (LOW, found by `security-reviewer`) — `Server::ingestBatch()`
+undercounted drops during sustained ring saturation.** Unlike `ingest()`
+(which checks ring space *before* pulling from the transport, so a full ring
+just leaves data in the kernel for a later call), `ingestBatch()` has already
+dequeued every staged item via `receiveBatch()` before its own loop runs — so
+a batch landing after the ring fills mid-drain is unrecoverably lost, not
+merely deferred. The prior code counted this as a single overflow regardless
+of how many staged items were actually dropped, which would visibly
+undercount real drops in `docs/benchmarks.md`'s throughput numbers whenever
+`--batch-ingest` hit a full ring. Fixed to add the true remaining count.
+
+**Fixed (LOW, found by `cpp-reviewer`) — a stale comment in
+`threaded_runner.h`.** Claimed "everything else in Server is touched only by
+`tick()`," but `ingest_overflows_` is written by `ingest()`/`ingestBatch()` on
+the I/O thread — still single-writer and safe (read only after both threads
+join), just not what the comment said. Corrected.
+
+**Deferred, not fixed (MEDIUM, found by `security-reviewer`) — the ring's
+FIFO, no-per-source-quota, drop-on-full contract is unchanged from before
+threading existed, but the I/O and sim threads can now genuinely run in
+parallel on separate cores, so a flood can drive the ring to saturation
+faster and keep it saturated longer than the old single-threaded epoll loop's
+incidental throttling allowed.** When the ring is full, a legitimate player's
+packet and an attacker's flood packet are dropped indistinguishably — both
+only ever increment the same aggregate `ingest_overflows_` counter. This is
+the same root cause as the three P2 CRITICAL findings (no session
+authentication, no per-source rate limiting), not a new qualitative
+attacker-vs-victim asymmetry the threading split introduced — a real fix
+needs per-source admission control, which is out of scope for a phase that
+only splits I/O and sim across two threads. Deferred in the same spirit as
+the P2 CRITICALs, recorded here rather than fixed quietly.
+
+**Verified, no fix needed — every other question the plan raised.**
+`Server::ingestBatch()` cannot acquire a ring slot it then fails to fill and
+wedge the ring: it stages received packets into a fully local buffer via
+`receiveBatch()` *first*, completely decoupled from ring state, and only
+afterward pushes staged items into the ring one at a time, `break`-ing
+immediately (not partially) the moment a slot can't be acquired. The per-call
+oversized-datagram cap (`kMaxOversizedSkipsPerCall`, Task 1) has no equivalent
+on the `receiveBatch()` path, but needs none: `tryReceive()`'s cap exists to
+bound an internal unbounded retry loop, while `receiveBatch()` issues exactly
+one `recvmmsg()` syscall per call, itself capped at 64 messages by the
+kernel — the bound is already structural. `--sim-load-us` has zero attacker
+reachability, confirmed by grepping every reference: it is a `tw_server` CLI
+argument only, threaded through `ThreadedRunner`'s constructor, never
+touched by any wire-protocol decode path or packet field. The three P2
+CRITICAL findings (spoofable session authorization, join/snapshot
+amplification, session-table exhaustion) are re-verified unaffected by
+diffing `session.h`/`session.cpp`/`protocol.{h,cpp}`/`docs/wire-format.md`
+against the P4 tip commit — byte-for-byte unchanged, not assumed. The
+`if constexpr` compile-time forks in `threaded_runner.h`
+(`nativeHandle()`/`receiveBatch()` presence) correctly discard the
+unavailable branch for `LoopbackTransport` at compile time, with no runtime
+fallback path that could silently pick the wrong behavior. The 38 KB stack-
+allocated `staging` array in `ingestBatch()` is on a real OS thread's normal
+~8 MB stack (unlike the previously-fixed 8 MB `JitterStats` case in
+`bench_queue.cpp`, which was comparable to an entire stack) — not a safety
+issue, though it does zero-fill on every call regardless of how many slots
+`receiveBatch()` actually returns, a candidate for a future perf pass if
+`--batch-ingest` numbers ever look off. `LoopbackTransport`'s lack of internal
+thread-safety is a latent footgun for a future test author adding genuine
+bidirectional traffic to a `ThreadedRunner`-driven `LoopbackTransport` test,
+but not attacker-reachable (production always uses `UdpTransport`) and no
+current test exercises it concurrently — noted, not fixed.
+
+---
+
+## P6 — Lag compensation
+
+**Pivot — the wire format reopens a second time, deliberately, to protocol
+version 3: `InputCommand` gains `view_tick` (25 → 29 bytes).** Decided while
+writing the P6 plan (2026-09-12), before any code, and put to the user
+explicitly rather than made quietly — the standard this doc's P2 section set.
+Server-side rewind needs one fact only the client has: *which tick's world it
+drew* when it fired. P3 and P4 each found that a header field P1 had reserved
+already carried what they needed; P6 is the first phase where no existing field
+does. Three options were weighed:
+
+- **Derive it server-side** as `ack_tick − kInterpDelayTicks` — no wire change.
+  Rejected: the client's render tick runs 0–2+ ticks ahead of that estimate
+  between snapshots (plus `Interpolator`'s ±1 nudges), up to ~0.27 units at
+  `kMoveSpeed` against a 0.5 hit radius — edge shots would register wrong, which
+  is precisely the "hit registered at the wrong position" failure the design doc
+  names as P6's. It also makes the demo's toggle a server flag needing a restart
+  per comparison.
+- **Smuggle it into the header's `seq` field**, unused on `Input` packets —
+  exact, zero bytes, no version bump. Rejected: it gives the reliable-channel
+  sequence field an unrelated second meaning. P4's `ack_tick` precedent does not
+  transfer — that field's second meaning was the *same* concept ("highest tick
+  seen from the peer") in the other direction; a rewind tick in `seq` is not.
+- **Protocol v3 — chosen.** Exact, honest, and `view_tick = 0` doubles as the
+  client-side "uncompensated" toggle. Contained to one plan task (Task 1), which
+  re-freezes the format in the same commits, exactly as P2's amendment was.
+  `MsgType::kHitConfirm = 7` lands in the same task via the additive path P2's
+  hit-feedback decision reserved for it.
+
+Not added, deliberately: the session-token scheme P2's security review named as a
+candidate for "any future phase that changes the wire format again." It was
+considered at this reopening and left out — a session-authentication redesign is
+its own scope, and folding it into lag compensation would make neither reviewable.
+Recorded so the omission reads as a decision, not an oversight.
+
+**Decision — rewind reproduces what the client *drew*, not where the target
+*was*.** See the P6 plan's Self-Review ("Exact reproduction over per-tick
+history") for the full reasoning; the plan's Task 3 makes it structural by moving
+`Interpolator::sample`'s logic into `net::samplePlayerAt`, which both the client's
+render path and the server's rewind call. The residual gap this accepts: if a
+client itself lost or dropped the bracketing snapshot (under loss or
+reordering), it lerped across a wider gap than the server's ring can
+reproduce — Task 7's jitter exercises exactly this, and the measured hit rate
+below already reflects it.
+
+**Decision — `kMaxRewindTicks = 45` is derived from the server's own ring
+geometry, not chosen by feel.** When pass 2 of tick `F` runs, `history_`
+(`net::kSnapshotRingSlots` = 16 snapshots, `kSnapshotIntervalTicks` = 3 apart)
+holds a newest entry at a tick `>= F - 3` and an oldest entry at a tick
+`>= F - 48` (at most `F - 46`). A view tick no more than 45 behind `F` is
+therefore always at or after the ring's oldest entry, so the bracketing
+snapshot the client sampled is guaranteed still present — beyond that, the
+server could silently sample a *different* bracket than the client did, which
+would break the exact-reproduction property above, so it refuses instead. A
+`static_assert` beside `kSnapshotIntervalTicks` in `server.h` pins this
+derivation so a future change to either constant fails to compile rather than
+silently invalidating it. Expected real depth at the 200 ms demo was
+estimated at ~24 ticks (lead 3 + RTT ~12 + snapshot wait ≤3 + interpolation
+delay 6) before any code existed; Task 7 measured exactly 24.
+
+**Decision — a refused rewind falls back to resolving against the live
+world, exactly like an uncompensated shot, rather than voiding the shot.**
+This is the least surprising outcome for an honest player whose request
+happened to be implausible (clock hiccup, a snapshot aged out of the ring),
+and it hands an attacker nothing beyond what turning compensation off
+already gives them for free — confirmed explicitly by the Task 9 security
+review (see below).
+
+**Decision — a rewound target is excluded, not substituted, when its id was
+reused since the sampled bracket.** `SessionTable::joinOrGet` hands out the
+lowest free id, so after a leave, that id's history entries can describe a
+*different*, earlier occupant. Sampling such a bracket would place the new
+occupant at the old one's position and credit a hit on a ghost. Fixed by
+recording `SessionTable::Entry::joined_tick` (assigned explicitly on every new
+session, per the pre-existing convention that a field without an explicit
+assignment in `joinOrGet` silently relies on `removeAt`'s implicit tail-slot
+reset) and skipping a target in `buildRewoundView` whenever the sampling
+bracket's own tick is at or before that occupant's `joined_tick`. Folds in
+P3's own open note that `hits_` was never reset on id reuse (`shots_` gets
+the identical treatment, since it's new this phase with the same indexing).
+
+**Measured hit rate, Task 7 (`lagcomp_hitrate_test`, 100 ms one-way latency +
+10 ms jitter each direction, 200 ms round trip, real `UdpTransport`, seed 7):**
+shots aimed at a target sweeping vertically past the shooter's row —
+
+```
+lagcomp=on  shots=75 hits=75 hit_rate=1.000 rewound=75 rejected=0 max_depth_ticks=24
+lagcomp=off shots=75 hits=8  hit_rate=0.107 rewound=0  rejected=0 max_depth_ticks=24
+```
+
+Compensated: every shot rewound (`rewound == shots`), none refused, 100% hit
+rate. Uncompensated: 10.7% hit rate, not 0% — the target's sweep reverses
+direction every 2 s, so a shot aimed at where it was drawn occasionally lands
+where the live target has since moved back to, exactly the residual the plan's
+Measurement Honesty constraint predicted rather than a discrepancy to explain
+away. Measured max rewind depth (24 ticks) lands almost exactly on Task 4's
+~24-tick estimate for the 200 ms demo (lead 3 + RTT ~12 + snapshot wait ≤3 +
+interpolation delay 6), comfortably inside `kMaxRewindTicks` (45) — this test
+passed on its first run, as the plan predicted for a measurement task once
+Tasks 1–6 were already correct.
+
+**Finding — no collateral test staleness this reopening, unlike P1/P2/P4's
+precedent, except one golden-vector test the plan didn't name.** Widening
+`kInputBytes` (25 → 29) and `kMaxMsgType` (6 → 7) has, in every prior wire
+reopening, shifted the `RandomByteBuffersNeverCrashADecoder` fuzz sweep's draw
+sequence enough to lose its one required payload-shaped hit; it did again here
+— seed 2 (in place since P4) stopped hitting, re-searched upward, seed 1
+reliably hits. Additionally, `tests/net/framing_test.cpp`'s
+`FramePacketTest.BuildsAWholeDatagramWithACorrectPayloadLen` golden-vector test
+was not named in Task 1's plan text (only `protocol_test.cpp`,
+`robustness_test.cpp`, and `framing_test.cpp`'s *new* `HitConfirmCodecTest`
+were), but it hardcodes the pre-v3 version byte (`0x02`) and payload length
+(`0x19` = 25) in its `expected_header` golden array — a collateral break caught
+immediately by the Checkpoint 1 verification run (`ctest -R
+'protocol_test|robustness_test|framing_test'` matched and ran it), not missed.
+Fixed in the same commit by updating the golden bytes to `0x03`/`0x1D` (29).
+
+### Task 9 boundary — mandatory security review findings
+
+Threat model (unchanged from P1–P5): an unauthenticated attacker controls
+every byte of every datagram, can send them at any rate, and can forge any
+source address the network permits. Reviewed via the `security-reviewer` and
+`cpp-reviewer` agents in parallel over `src/server/rewind.{h,cpp}`, the P6
+diffs to `src/server/server.h`, `src/server/session.{h,cpp}`,
+`src/client/client.h`, `src/net/{protocol,framing,snapshot_ring}.{h,cpp}`,
+`src/sim/{sim.h,world.h,world.cpp}`, and `apps/tw_{server,client}.cpp`. **No
+CRITICAL or HIGH findings** — nothing required fixing before this phase could
+be considered done.
+
+**Verified closed — the attacker-chosen `view_tick` cannot escape its bounds,
+and a refused rewind grants nothing extra.** `buildRewoundView` rejects, in
+order, `view_tick == 0`, `view_tick >= fire_tick` (ordered first specifically
+so the next check's subtraction cannot underflow), `fire_tick - view_tick >
+kMaxRewindTicks`, and `view_tick > ackedSnapshotTick(shooter)`. `fire_tick` is
+always the server's own `next` tick, never client-supplied; `ackedSnapshotTick`
+is itself bounded to `<= world_.tick()` at record time
+(`handleInput`'s future-ack guard, P4), so `view_tick <= ackedSnapshotTick <=
+world_.tick() < fire_tick` always holds independent of the explicit check. A
+refused rewind falls through to exactly the same `world_.resolveHitscan(...)`
+call an uncompensated (`view_tick == 0`) shot takes — the residual "attacker
+picks the most favorable moment inside the legal window" is inherent to lag
+compensation (Valve's `sv_maxunlag` exists for the same reason) and is an
+accepted risk, not a defect.
+
+**Verified closed — rewind CPU cost is bounded and not attacker-amplifiable
+beyond the existing fire-rate cap.** `tryFire`'s `kFireCooldownTicks` gate runs
+*before* `buildRewoundView` is ever invoked, so a cooldown-violating request
+never reaches the rewind computation. Per call: one `writeSnapshot` (O(32)),
+one shooter lookup, one ring scan (O(16)), then up to 31 targets each costing a
+`joinedTick` lookup plus one `samplePlayerAt` call (~O(96)) — worst case (32
+sessions firing the same tick) is on the order of 10⁵ simple array-compare
+ops per tick, microseconds against a 16.67 ms budget. Bounded by the existing
+fixed `kMaxPlayers = 32` ceiling; P6 adds no new CPU-DoS surface beyond what
+firing already had.
+
+**Verified closed — `kHitConfirm` is single-send, shooter-only, and
+rate-bounded; quantified as a minor addendum to the P2 join/snapshot
+amplification finding, not a new one.** Sent at most once per resolved hit,
+gated by the same `tryFire` cooldown, resolved to the shooter's *own* bound
+endpoint via `endpointFor` — never the target's, never broadcast. 32 bytes on
+the wire (24 B header + 8 B payload). For an attacker who already holds a
+spoofed-source session (the P2 Finding 1 precondition), this adds at most
+≤160 B/s (≤5 pkts/sec) to that session's traffic — a sub-1x response/request
+byte ratio, unlike the up-to-~33x ratio the P2 amplification finding already
+records for `JoinRequest` → `Snapshot`. Recorded here as a quantified
+addendum to that existing deferred finding, not a new one and not a severity
+change.
+
+**Verified closed — id reuse cannot inherit a departed player's counts or
+rewind history.** Both removal sites (`handleLeave`, the timeout-expiry loop)
+reset `hits_`/`shots_`/`inputs_` for the freed id, matching the pattern
+`inputs_` already established at P3. `SessionTable::Entry::joined_tick` is
+assigned explicitly on every new session (`session.cpp`'s `joinOrGet`), not
+left to `removeAt`'s implicit tail-slot zeroing, per the pre-existing warning
+comment at that exact spot. For a same-tick leave-then-rejoin of the same id:
+packet routing fully drains before pass 1/pass 2 run and before `world_.tick()`
+advances, so a same-tick rejoin's `joined_tick` is stamped with the *current,
+pre-step* tick `F`; any legal `view_tick` a shooter can request already
+satisfies `view_tick <= ackedSnapshotTick(shooter) <= F`, so the bracket
+exclusion rule (`bracket->tick <= sessions.joinedTick(id)`) always trips for
+the reused id in this scenario too — not just the multi-tick-gap case Task 4
+Checkpoint 3's test exercises.
+
+**Verified closed — no new non-finite-float path.** `view_tick` is a
+`uint32_t`, not a float, so it carries no finiteness concern of its own.
+Rewound positions come only from the server's own already-validated `World`
+state and interpolation between two already-finite historical records (whose
+bracket denominator can never be zero, by `newestAtOrBefore`/`oldestAfter`'s
+strict-vs-inclusive split). `sim::resolveHitscan` receives only the
+already-validated `aim_x`/`aim_y` as attacker floats, on both the rewound and
+live-fallback paths.
+
+**Verified closed — no downgrade path.** `decodeHeader` rejects
+`version != kProtocolVersion` (3) before any payload decode reaches
+`route()`/`handlePacket()`; `decodeInput` requires exactly 29 bytes, so a
+25-byte (v2-shaped) payload is rejected regardless of header version.
+
+**Verified closed — a forged `kHitConfirm` cannot do more than move a client's
+own HUD counters.** The P3-established `slot.peer != server_` guard in
+`Client::handlePacket` runs before the type `switch`, covering `kHitConfirm`
+with no exception. A confirm forged from the server's own (already-assumed
+spoofable) address only updates `hits_confirmed_`/`last_hit_target_`/
+`last_hit_fire_tick_` — none of which feed `predicted_`, `clock_`, `pending_`,
+or anything the client sends.
+
+**Observed, not fixed — the P4 `Interpolator` id-reuse ghost is unaffected by
+P6 and remains a cosmetic-only residual.** `client::Interpolator` has no
+session-join awareness and is untouched by this phase's diff, so a client can
+still briefly lerp between two occupants of a reused id on screen. Server-side
+scoring is independently protected by `buildRewoundView`'s bracket-exclusion
+rule, which operates on server session/history state, not client rendering —
+the visual artifact cannot translate into a credited hit on the wrong
+occupant. Same disposition P4 gave it: recorded as observed, not a defect to
+fix here.
+
+**Re-verified — the three P2 CRITICAL findings, checked against this phase's
+actual diff rather than assumed.** Unlike P3 (which found `session.{h,cpp}`
+byte-for-byte unchanged), P6 *does* modify `session.h`/`session.cpp` — adding
+`joined_tick` and its accessor. Checked individually: **Finding 1**
+(spoofable session authorization) — `SessionTable::authorize()` is
+byte-for-byte unchanged, still pure endpoint-to-id binding; unaffected.
+**Finding 2** (join/snapshot amplification) — unaffected at the root, gains
+the quantified `kHitConfirm` addendum recorded above; no severity change.
+**Finding 3** (session-table exhaustion via id churn) — `joinOrGet`'s
+lowest-free-id assignment and the fixed 32-slot capacity are unchanged;
+`joined_tick` is inert metadata that touches neither capacity nor id
+selection; unaffected. All three stand exactly as P2 recorded, with Finding 2
+now carrying one quantified addendum.
+
+**Noted, not fixed (LOW, cpp-reviewer) — `buildRewoundView` makes three
+~800 B stack copies of a `WorldSnapshot`-shaped value** (`live_snap`,
+`result`, then `out = result`) where one write-through would do. Runs at most
+once per fire, already bounded by `kFireCooldownTicks` (≤5/sec/session) — the
+same "not worth optimizing ahead of a measurement" posture `broadcastSnapshot`
+already states for its own per-broadcast encode cost. Deferred, not fixed,
+consistent with that precedent.
+
+**Verified, no fix needed — every other question the plan raised.** The
+`aim_x`/`aim_y` unconditional zero-initialization in `apps/tw_client.cpp`
+means an unaimed shot from a not-yet-seeded local player is a degenerate
+no-op in `resolveHitscan`, not UB. `InputCommand::view_tick`'s default member
+initializer keeps the struct a trivially-copyable aggregate with no new
+constructors. The new `Server` counters (`shots_`, `rewound_shots_`,
+`rewinds_rejected_`) are written only inside `tick()`'s pass 2 and read only
+after `ThreadedRunner`'s sim thread joins — `threaded_runner.h` itself is
+untouched by this phase, so the P5-established two-thread ownership split
+needs no change. `net::samplePlayerAt`'s body was moved character-for-character
+out of `client::Interpolator::sample` (confirmed via diff), so no behavioral
+drift versus P4's original logic is possible.
+
+## P6 demo follow-up
+
+**Finding — `tw_server --port N` bound the byte-swapped port, present since
+P2, invisible for four phases.** `apps/tw_server.cpp:139` passed the
+host-order `port` straight to `UdpTransport::bind(uint32_t addr_be, uint16_t
+port_be)`, which expects network order. `--port 41237` (0xA115) bound `5537`
+(0x15A1) instead, and `tw_server` itself printed the wrong port back. Present
+since `3b166fd` (P2, 2026-09-08). Every script and every test across P2–P6
+used `--port 0`, whose byte swap is itself `0` — the bug was invisible
+through the entire test suite and every phase's own CI run. The first fixed-
+port invocation was this follow-up's own README recipe (`--port 41234`),
+where it surfaced immediately: the client never joined, because the server
+was actually listening on a different port than the one printed. Fixed in
+`48055e3` (`fix: bind tw_server to the port it was given, not its byte
+swap`) with `htons(port)`, verified by a new `server_app_fixed_port` CTest
+that checks the server's own `getsockname()`-derived readback against the
+requested port — proving the fix, not just that binding succeeds.
+
+**Finding — the demo HUD overflowed the 800px window.** The single-line
+HUD's `lagcomp=`/`hits=` fields sat past the right edge, unreadable without
+maximizing the window. Fixed in `294ba13` by regrouping into three shorter
+`DrawText` lines.
+
+**Finding — the first human check found lagcomp on/off "very minimal, not
+very clear" by eye, tracing to hit-radius-vs-aim-error, not a toggle
+defect.** With the port bug worked around (`--port 0`), the toggle path
+itself was already verified correct by reading the code before any tuning
+changed: `Client` stamps `view_tick = 0` when off (`client.h:223`), `Server`
+rewinds and counts only when `view_tick != 0` (`server.h:127`) — confirmed
+by the server's own reported counters (see the human-verified section
+below). The problem was the demo's readability, not correctness: at the
+pre-fix zoom (8px/world-unit), the player is 8px across and the hit radius
+is 4px — roughly one dot-width of ordinary human mouse-tracking error
+already erases the statistical gap `lagcomp_hitrate_test` cleanly shows
+(100% vs 11%). `tools/lagcomp_probe` (`9bffc7e`) makes this reproducible;
+its full matrix, run inside the pinned `tickwire-dev` image (deterministic —
+reproduced bit-for-bit across two separate runs):
+
+```
+topology=test reverse_ticks=120 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.100 off_hits=15/150 gap=+0.900
+topology=demo reverse_ticks=120 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.007 off_hits=1/150 gap=+0.993
+topology=test reverse_ticks=30 axis=y aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.200 off_hits=30/150 gap=+0.800
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.400 off_hits=60/150 gap=+0.600
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.25 on=0.973 on_hits=146/150 off=0.193 off_hits=29/150 gap=+0.780
+topology=demo reverse_ticks=30 axis=x aim_sigma=0.50 on=0.687 on_hits=103/150 off=0.193 off_hits=29/150 gap=+0.493
+topology=demo reverse_ticks=30 axis=x aim_sigma=1.00 on=0.307 on_hits=46/150 off=0.233 off_hits=35/150 gap=+0.073
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.00 on=1.000 on_hits=150/150 off=0.100 off_hits=15/150 gap=+0.900
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.25 on=0.980 on_hits=147/150 off=0.060 off_hits=9/150 gap=+0.920
+topology=demo reverse_ticks=120 axis=x aim_sigma=0.50 on=0.660 on_hits=99/150 off=0.093 off_hits=14/150 gap=+0.567
+topology=demo reverse_ticks=120 axis=x aim_sigma=1.00 on=0.293 on_hits=44/150 off=0.260 off_hits=39/150 gap=+0.033
+```
+
+Reading this: at `aim_sigma=0` (perfect aim, as `lagcomp_hitrate_test`
+itself simulates), the gap is large and consistent (+0.60 to +0.99) across
+every topology/reverse-period combination — the underlying mechanism is
+sound regardless of demo tuning. As `aim_sigma` rises toward 1.0 world unit
+(roughly an unzoomed demo's typical hand error), the gap collapses toward
++0.03–+0.07 — both modes converge toward "aim error dominates, compensation
+barely matters," since random misaims land on the live target about as
+often with or without rewind. At 4× zoom, the same absolute pixel error is a
+quarter the world-unit sigma, keeping the gap large (+0.90–+0.98 at
+`aim_sigma <= 0.25`) — this is why zoom, not a slower bot alone, was the fix
+that mattered: row `demo 120 x 1.0` (gap +0.033) shows a slower reversal
+period alone does not rescue a high-aim-error regime.
+
+**Finding — nothing else Tasks 1–4 touched needed a behavioral change beyond
+what the plan specified.** `--sweep-ticks`, the `Camera`/`screenToWorld`
+mapping, and the HUD regrouping all matched their contracts on the first
+implementation pass; each checkpoint's RED step reproduced exactly what the
+plan predicted (the byte-swapped port readback, the missing flag's usage
+text, a compile error, a missing-source configure error).
+
+### Interactive feel — human-verified after phase completion
+
+Same limitation P2–P4 recorded: this session's own tools cannot watch a
+WSLg-rendered window. Verified by a human running the fixed README recipe
+(`--port 41234 --sweep-ticks 120 --latency-ms 200`, 4× zoom, three-line HUD)
+after Tasks 1–4 landed: tracking the bot for ~15 seconds in each mode
+produced **54 hits with `lagcomp=on`**, **~6 hits with `lagcomp=off`** at the
+same 200ms latency — roughly 9× — and, as an unprompted extra control,
+**~16 hits with `lagcomp=off` at 0ms latency** (less real desync to
+compensate for, so more shots land on the live target by chance alone even
+uncompensated — consistent with the mechanism, not a discrepancy). The human
+confirmed on vs. off was **clearly distinguishable by eye** this time,
+unlike the pre-fix check. The server's final line read
+`lagcomp rewound_shots=82 rewinds_rejected=0`. No visual artifacts reported:
+no HUD clipping, no camera jitter, hit ring drawn in the expected place.
+This closes P6's last outstanding item.
+
+### P6 demo follow-up security review
+
+Threat model unchanged (an unauthenticated attacker controls every byte of
+every datagram, at any rate, from any forgeable source address). Reviewed
+via the `security-reviewer` agent over
+`git diff dev...HEAD -- apps/ scripts/ tools/ src/client/view.*`.
+**No CRITICAL or HIGH findings.**
+
+**Verified closed — the `htons` fix does not widen the bind.** Only the
+port argument to `UdpTransport::bind()` changed; the address argument
+(`htonl(INADDR_LOOPBACK)`) is untouched by this diff, confirmed by
+inspecting both `apps/tw_server.cpp` and `UdpTransport::bind()`'s handling
+of each argument (`src/net/udp.cpp`) — the server still binds loopback-only.
+
+**Verified closed — `--sweep-ticks` cannot reach division-by-zero or
+signed/unsigned wraparound.** Parsed as a signed `int` first and rejected
+(`return 1`, before any socket bind) if `< 1`, which excludes zero and every
+negative value before the `static_cast<uint32_t>` conversion — no path from
+a negative CLI argument to a huge wrapped `uint32_t`. The only consumer
+(`t / sweep_ticks`) is therefore always unsigned division by a value `>= 1`.
+Purely local CLI input, never attacker-reachable over the wire.
+
+**Verified closed — `screenToWorld` cannot produce a non-finite aim from
+finite mouse input.** Its only division is by
+`scale = side / (2 * kArenaHalf) * zoom`, which resolves to a fixed
+compile-time-derived positive constant (`32.0`) at every current call
+site — `kSide`/`kZoom` are both `constexpr`, never runtime- or
+attacker-derived. Mouse coordinates come from raylib's `GetMousePosition()`,
+local-only and finite by construction.
+
+**Recorded, not fixed (LOW, explicitly out of scope per this review's own
+instructions) — every app's `--port` parses as
+`static_cast<uint16_t>(std::atoi(...))`, silently wrapping values over
+65535** (`--port 70000` binds/connects to `4464`). Pre-existing across all
+three binaries (`tw_server`, `tw_client`, `tw_loadclient`), not introduced by
+this diff. Confirmed LOW: the value is local operator-supplied CLI input,
+never crosses the network trust boundary this project's threat model is
+built around, and the truncation is well-defined `unsigned` narrowing (no
+UB) — worst case is a confusing UX failure (binds the wrong port), not a
+security bypass.
+
+**Noted, not a finding — `Camera::zoom`'s documented precondition
+(`zoom > 0` and finite) is unenforced by assertion.** Unreachable today
+(every call site passes a `constexpr`), but a future runtime- or
+config-derived zoom value would silently produce `inf`/`nan` from
+`worldToScreen`/`screenToWorld` rather than fail loudly. Defensive-
+programming nit, not exploitable under the current diff.

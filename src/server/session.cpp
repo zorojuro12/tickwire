@@ -31,12 +31,18 @@ uint32_t SessionTable::joinOrGet(const net::Endpoint& from, uint32_t now_tick) {
     }
   }
 
+  // entries_[count_] is already a zeroed Entry{} here -- removeAt() always
+  // resets exactly the tail slot it vacates, so every field NOT explicitly
+  // assigned below (acked_snapshot_tick, ever_fired) still starts fresh.
+  // A field added to Entry later relies on this same implicit reset unless
+  // it's given its own explicit assignment here.
   Entry& e = entries_[count_];
   e.peer = from;
   e.player_id = new_id;
   e.last_seen_tick = now_tick;
   e.last_input_tick = 0;
   e.last_fire_tick = 0;
+  e.joined_tick = now_tick;
   e.live = true;
   ++count_;
   return new_id;
@@ -72,6 +78,25 @@ uint32_t SessionTable::lastInputTick(uint32_t player_id) const noexcept {
   int slot = findByPlayer(player_id);
   if (slot < 0) return 0;
   return entries_[static_cast<uint32_t>(slot)].last_input_tick;
+}
+
+void SessionTable::noteSnapshotAck(const net::Endpoint& from, uint32_t snapshot_tick) noexcept {
+  int slot = findByEndpoint(from);
+  if (slot < 0) return;
+  Entry& e = entries_[static_cast<uint32_t>(slot)];
+  if (snapshot_tick > e.acked_snapshot_tick) e.acked_snapshot_tick = snapshot_tick;
+}
+
+uint32_t SessionTable::ackedSnapshotTick(uint32_t player_id) const noexcept {
+  int slot = findByPlayer(player_id);
+  if (slot < 0) return 0;
+  return entries_[static_cast<uint32_t>(slot)].acked_snapshot_tick;
+}
+
+uint32_t SessionTable::joinedTick(uint32_t player_id) const noexcept {
+  int slot = findByPlayer(player_id);
+  if (slot < 0) return 0;
+  return entries_[static_cast<uint32_t>(slot)].joined_tick;
 }
 
 bool SessionTable::tryFire(uint32_t player_id, uint32_t now_tick) noexcept {

@@ -198,10 +198,22 @@ must be unreachable when the test fails. `git add` names exact paths; never
 
 ## Test Commands
 
+- **Always build before testing. `ctest` does not build.** A checkpoint whose
+  command is bare `ctest` never compiles the test it just wrote: `ctest -R`
+  either runs the previously built binary (so a new test case is absent and the
+  run is falsely green) or matches no target at all and **exits 0**. Every test
+  command in a plan is therefore
+  `cmake --build <dir> -j8 && ctest --test-dir <dir> -R <regex> --output-on-failure`,
+  wrapped in whatever the project's toolchain requires. (Observed in practice:
+  the P3 plan's template ran `ctest` alone at every one of its 35 checkpoints
+  while asserting "Expected: FAIL — compile error", an outcome bare `ctest`
+  cannot produce.)
 - **Inside a checkpoint:** scope to the target or test under test
-  (`ctest --test-dir build -R <regex>`), and to the single test when the
-  target is slow.
+  (`-R <regex>`), and to the single test when the target is slow.
 - **At a task boundary:** the full suite once, chained into one call.
+- **Sanitizer wrappers go around `ctest`, not the build** (`setarch -R ctest …`,
+  not `setarch -R cmake --build …`). Copy the exact form from the project's CI
+  script rather than reconstructing it.
 - **Never** put the full-suite command inside a checkpoint. Under this
   project's three sanitizer configurations a full run is expensive; a phase
   with 30 checkpoints that runs it at every one wastes hours.

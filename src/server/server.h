@@ -7,9 +7,12 @@
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "net/transport.h"
 #include "server/input_buffer.h"
 #include "server/packet_ring.h"
+#include "server/rewind.h"
 #include "server/session.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -17,9 +20,14 @@
 namespace server {
 
 inline constexpr uint32_t kSnapshotIntervalTicks = 3;  // 60 Hz sim -> 20 Hz snapshots
+// Pins Task 4's kMaxRewindTicks derivation: it assumes a view tick no more
+// than kMaxRewindTicks behind is always at or after history_'s oldest entry.
+// A future change to either constant that breaks this must fail loudly here,
+// not silently let the server sample a different bracket than the client did.
+static_assert(kMaxRewindTicks <= (net::kSnapshotRingSlots - 1) * kSnapshotIntervalTicks);
 inline constexpr size_t kIngestCapacity = 256;         // power of two, per PacketRing
 
-template <net::Transport T>
+template <net::Transport T, typename Ring = PacketRing<net::PacketSlot, kIngestCapacity>>
 class Server {
  public:
   explicit Server(T& transport) noexcept : transport_(transport) {}
@@ -45,6 +53,32 @@ class Server {
       ring_.commitWrite();
       ++accepted;
     }
+    return accepted;
+  }
+
+  // Batched receive via the transport's receiveBatch() (recvmmsg), for
+  // transports that support it. Only ever called for such a T -- never
+  // instantiated for one that doesn't, the same way ingest()'s callers never
+  // reach a transport without tryReceive(). Unlike ingest() (which checks
+  // ring space *before* pulling from the transport, so a full ring simply
+  // leaves data in the kernel's receive buffer for a later call),
+  // receiveBatch() has already dequeued every staged item from the kernel
+  // before this loop runs -- so a batch landing after the ring fills mid-
+  // drain is unrecoverably lost, not merely deferred. Every such loss is
+  // counted (not just one per batch), so ingest_overflows_ reflects the
+  // real drop count even under --batch-ingest.
+  size_t ingestBatch() noexcept {
+    constexpr size_t kBatchSize = 32;
+    std::array<net::PacketSlot, kBatchSize> staging{};
+    const size_t filled = transport_.receiveBatch(std::span<net::PacketSlot>(staging));
+    size_t accepted = 0;
+    for (; accepted < filled; ++accepted) {
+      net::PacketSlot* slot = ring_.acquireWrite();
+      if (slot == nullptr) break;
+      *slot = staging[accepted];
+      ring_.commitWrite();
+    }
+    if (accepted < filled) ingest_overflows_ += (filled - accepted);
     return accepted;
   }
 
@@ -79,12 +113,29 @@ class Server {
     // Pass 2: resolve every fire only after every session's input for this
     // tick has been applied -- so a hit never depends on session iteration
     // order (the shooter's fire resolving against the target's stale
-    // pre-input position).
+    // pre-input position). Ray-tests against the shooter's rewound view when
+    // one is requested and plausible; the shooter itself is never rewound
+    // (its own live position is exactly what it drew -- P3 predicts it
+    // exactly), only other players are sampled from history_.
     for (size_t i = 0; i < fire_count; ++i) {
       const sim::InputCommand& in = fire_candidates[i];
-      if (sessions_.tryFire(in.player_id, next) &&
-          world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y).has_value()) {
+      if (!sessions_.tryFire(in.player_id, next)) continue;
+      ++shots_[in.player_id - 1];
+
+      std::optional<uint32_t> target;
+      sim::WorldSnapshot rewound{};
+      if (in.view_tick != 0 &&
+          buildRewoundView(world_, history_, sessions_,
+                            {in.player_id, in.view_tick, next}, rewound)) {
+        ++rewound_shots_;
+        target = sim::resolveHitscan(rewound, in.player_id, in.aim_x, in.aim_y);
+      } else {
+        if (in.view_tick != 0) ++rewinds_rejected_;
+        target = world_.resolveHitscan(in.player_id, in.aim_x, in.aim_y);
+      }
+      if (target.has_value()) {
         ++hits_[in.player_id - 1];
+        sendHitConfirm(in.player_id, *target, in.tick, next, now_ms);
       }
     }
 
@@ -104,21 +155,36 @@ class Server {
       // player inherits the same id, up to ~1s later -- found by the P3
       // Task 8 security review.
       inputs_[expired[i] - 1].reset();
+      hits_[expired[i] - 1] = 0;
+      shots_[expired[i] - 1] = 0;
     }
   }
 
   size_t queuedPackets() const noexcept { return ring_.size(); }
   uint32_t worldTick() const noexcept { return world_.tick(); }
   const sim::World& world() const noexcept { return world_; }
+  const SessionTable& sessions() const noexcept { return sessions_; }
   uint32_t playerFor(const net::Endpoint& ep) const noexcept { return sessions_.playerFor(ep); }
   uint64_t hits(uint32_t player_id) const noexcept {
     if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
     return hits_[player_id - 1];
   }
+  uint64_t shots(uint32_t player_id) const noexcept {
+    if (player_id == sim::kInvalidPlayerId || player_id > sim::kMaxPlayers) return 0;
+    return shots_[player_id - 1];
+  }
+  uint64_t rewoundShots() const noexcept { return rewound_shots_; }
+  uint64_t rewindsRejected() const noexcept { return rewinds_rejected_; }
   uint64_t droppedPackets() const noexcept { return dropped_; }
   uint64_t ingestOverflows() const noexcept { return ingest_overflows_; }
   uint64_t inputUnderruns() const noexcept { return input_underruns_; }
   uint64_t lateInputs() const noexcept { return late_inputs_; }
+  uint64_t deltasSent() const noexcept { return deltas_sent_; }
+  uint64_t keyframesSent() const noexcept { return keyframes_sent_; }
+  uint64_t snapshotBytesSent() const noexcept { return snapshot_bytes_sent_; }
+  uint64_t snapshotBytesFullEquivalent() const noexcept {
+    return snapshot_bytes_full_equivalent_;
+  }
 
  private:
   static void spawnPosition(uint32_t player_id, float& x, float& y) noexcept {
@@ -140,7 +206,7 @@ class Server {
         handleJoin(slot.peer, h, now_ms);
         break;
       case net::MsgType::kInput:
-        handleInput(slot.peer, r);
+        handleInput(slot.peer, h, r);
         break;
       case net::MsgType::kLeave:
         handleLeave(slot.peer, h);
@@ -165,15 +231,22 @@ class Server {
     world_.removePlayer(id);
     // See the identical note at the timeout-expiry call site: clears any
     // future-ticked input this session already queued, so a reused id
-    // doesn't inherit and execute it under a new, unconsenting owner.
+    // doesn't inherit and execute it under a new, unconsenting owner. The
+    // same reasoning applies to hits_/shots_: a reused id must not inherit
+    // the departed occupant's cumulative counts (P3's security review noted
+    // this for hits_ but left it unfixed; P6 makes it client-visible and
+    // adds shots_ with the same indexing, so both are fixed here).
     inputs_[id - 1].reset();
+    hits_[id - 1] = 0;
+    shots_[id - 1] = 0;
   }
 
   // Buffers `in` against the tick it is stamped for; does not apply it.
   // Application happens in tick()'s pass 1, at the tick the input names --
   // never at arrival, which is what makes the client's replay reproduce the
   // server's steps exactly.
-  void handleInput(const net::Endpoint& from, net::ByteReader& r) noexcept {
+  void handleInput(const net::Endpoint& from, const net::PacketHeader& h,
+                    net::ByteReader& r) noexcept {
     sim::InputCommand in{};
     if (!net::decodeInput(r, in)) {
       ++dropped_;
@@ -185,8 +258,17 @@ class Server {
     }
     // Liveness updates unconditionally on a decoded, authorized input --
     // independent of whether the InputBuffer's acceptance window then
-    // takes it.
+    // takes it. The snapshot acknowledgment is likewise recorded only after
+    // authorize() succeeds -- an unauthorized sender must not be able to
+    // move another session's delta baseline. ack_tick is otherwise
+    // unvalidated attacker-controlled data; a legitimate client can only
+    // have received a snapshot the server already sent, which is always
+    // <= world_.tick(), so a larger value is rejected outright rather than
+    // recorded -- without this, a single bogus ack_tick permanently pins
+    // the session to full keyframes (every genuine, smaller ack_tick is
+    // then monotonically rejected as "older" by noteSnapshotAck).
     sessions_.touch(from, world_.tick(), 0);
+    if (h.ack_tick <= world_.tick()) sessions_.noteSnapshotAck(from, h.ack_tick);
     if (inputs_[in.player_id - 1].push(in)) {
       sessions_.touch(from, world_.tick(), in.tick);
     } else {
@@ -230,6 +312,28 @@ class Server {
     sendFramed(to, out_h, payload);
   }
 
+  // Notifies the shooter only -- never broadcast, never sent to the target.
+  void sendHitConfirm(uint32_t shooter, uint32_t target, uint32_t fire_tick, uint32_t tick,
+                       uint32_t now_ms) noexcept {
+    net::Endpoint to;
+    if (!sessions_.endpointFor(shooter, to)) {
+      ++dropped_;
+      return;
+    }
+    const net::HitConfirm hc{.target_id = target, .fire_tick = fire_tick};
+    std::array<std::byte, net::kHitConfirmBytes> payload{};
+    net::ByteWriter pw(payload);
+    if (!net::encodeHitConfirm(hc, pw)) {
+      ++dropped_;
+      return;
+    }
+    net::PacketHeader out_h;
+    out_h.type = net::MsgType::kHitConfirm;
+    out_h.tick = tick;
+    out_h.send_time_ms = now_ms;
+    sendFramed(to, out_h, payload);
+  }
+
   void sendLeave(const net::Endpoint& to, uint16_t ack_seq, uint32_t now_ms) noexcept {
     net::PacketHeader out_h;
     out_h.type = net::MsgType::kLeave;
@@ -239,21 +343,53 @@ class Server {
     sendFramed(to, out_h, {});
   }
 
+  // Encodes and sends the newest snapshot once per session, because each
+  // session may hold a different acknowledged baseline. A session whose
+  // acknowledged tick still has a matching entry in `history_` gets a delta
+  // against it; every other session (never acknowledged, or its baseline
+  // has aged out of the ring) gets the full snapshot. Deliberately no
+  // group-by-baseline cache: 32 sessions x 20 Hz is 640 encodes/second of a
+  // sub-microsecond function, not worth optimizing ahead of P5's own
+  // measurements.
   void broadcastSnapshot(uint32_t now_ms) noexcept {
     world_.writeSnapshot(snapshot_);
-    net::ByteWriter pw(snapshot_payload_);
-    if (!net::encodeSnapshot(snapshot_, pw)) {
-      ++dropped_;
-      return;
-    }
-    const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
+    history_.store(snapshot_);
 
     for (size_t i = 0; i < sessions_.count(); ++i) {
+      const uint32_t pid = sessions_.playerAt(i);
+      const sim::WorldSnapshot* baseline = history_.find(sessions_.ackedSnapshotTick(pid));
+
+      net::ByteWriter pw(snapshot_payload_);
+      net::MsgType type = net::MsgType::kSnapshotDelta;
+      bool ok = false;
+      if (baseline != nullptr && baseline->tick != snapshot_.tick) {
+        ok = net::encodeSnapshotDelta(*baseline, snapshot_, pw);
+      }
+      if (!ok) {
+        pw = net::ByteWriter(snapshot_payload_);
+        type = net::MsgType::kSnapshot;
+        ok = net::encodeSnapshot(snapshot_, pw);
+      }
+      if (!ok) {
+        ++dropped_;
+        continue;
+      }
+
+      if (type == net::MsgType::kSnapshotDelta) {
+        ++deltas_sent_;
+      } else {
+        ++keyframes_sent_;
+      }
+      snapshot_bytes_sent_ += pw.size();
+      snapshot_bytes_full_equivalent_ +=
+          net::kSnapshotFixedBytes + snapshot_.count * net::kPlayerStateBytes;
+
       net::PacketHeader out_h;
-      out_h.type = net::MsgType::kSnapshot;
+      out_h.type = type;
       out_h.tick = world_.tick();
       out_h.send_time_ms = now_ms;
-      out_h.ack_tick = sessions_.lastInputTick(sessions_.playerAt(i));
+      out_h.ack_tick = sessions_.lastInputTick(pid);
+      const std::span<const std::byte> payload(snapshot_payload_.data(), pw.size());
       sendFramed(sessions_.endpointAt(i), out_h, payload);
     }
   }
@@ -275,16 +411,24 @@ class Server {
   T& transport_;
   sim::World world_;
   SessionTable sessions_;
-  PacketRing<net::PacketSlot, kIngestCapacity> ring_;
+  Ring ring_;
   std::array<InputBuffer, sim::kMaxPlayers> inputs_{};
   std::array<std::byte, net::kMaxPacket> send_buf_{};
   sim::WorldSnapshot snapshot_{};
   std::array<std::byte, net::kMaxPacket> snapshot_payload_{};
+  net::SnapshotRing history_;
   std::array<uint64_t, sim::kMaxPlayers> hits_{};
+  std::array<uint64_t, sim::kMaxPlayers> shots_{};
+  uint64_t rewound_shots_ = 0;
+  uint64_t rewinds_rejected_ = 0;
   uint64_t dropped_ = 0;
   uint64_t ingest_overflows_ = 0;
   uint64_t input_underruns_ = 0;
   uint64_t late_inputs_ = 0;
+  uint64_t deltas_sent_ = 0;
+  uint64_t keyframes_sent_ = 0;
+  uint64_t snapshot_bytes_sent_ = 0;
+  uint64_t snapshot_bytes_full_equivalent_ = 0;
 };
 
 }  // namespace server

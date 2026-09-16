@@ -1,14 +1,18 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 
 #include "client/clock_sync.h"
+#include "client/interpolation.h"
 #include "client/prediction.h"
 #include "net/bytes.h"
 #include "net/framing.h"
 #include "net/protocol.h"
+#include "net/snapshot_delta.h"
+#include "net/snapshot_ring.h"
 #include "net/transport.h"
 #include "sim/sim.h"
 #include "sim/world.h"
@@ -42,6 +46,7 @@ class Client {
 
   void tick(uint32_t now_ms) noexcept {
     ++tick_;
+    interp_.advance();
 
     net::PacketSlot slot;
     while (transport_.tryReceive(slot)) {
@@ -70,7 +75,8 @@ class Client {
                                 .move_y = move_y,
                                 .aim_x = aim_x,
                                 .aim_y = aim_y,
-                                .fire = fire};
+                                .fire = fire,
+                                .view_tick = viewTickForThisFrame()};
     std::array<std::byte, net::kInputBytes> payload{};
     net::ByteWriter pw(payload);
     if (!net::encodeInput(in, pw)) return false;
@@ -79,6 +85,12 @@ class Client {
     h.type = net::MsgType::kInput;
     h.tick = tick_;
     h.send_time_ms = now_ms;
+    // Names the newest snapshot this client holds, which is what makes the
+    // server's delta baseline self-healing under packet loss:
+    // latest_snapshot_tick_ is only ever assigned from a snapshot this
+    // client has accepted and stored, so it can never name a baseline this
+    // client does not hold.
+    h.ack_tick = latest_snapshot_tick_;
     if (!sendFramed(h, payload)) return false;
 
     pending_.record(in, now_ms);
@@ -109,6 +121,16 @@ class Client {
   uint32_t clientTick() const noexcept { return tick_; }
   int32_t clockLead() const noexcept { return clock_.lead(); }
   uint32_t clockSnaps() const noexcept { return clock_.snaps(); }
+  const net::SnapshotRing& snapshots() const noexcept { return snapshots_; }
+  uint32_t deltasApplied() const noexcept { return deltas_applied_; }
+  uint32_t deltasDropped() const noexcept { return deltas_dropped_; }
+  uint32_t renderTick() const noexcept { return interp_.renderTick(); }
+
+  // A pure toggle, like P3's prediction toggle: interp_ keeps advancing and
+  // observing while it is off, so re-enabling resumes immediately rather
+  // than re-seeding.
+  void setInterpolationEnabled(bool on) noexcept { interpolation_enabled_ = on; }
+  bool interpolationEnabled() const noexcept { return interpolation_enabled_; }
 
   // A pure toggle: the prediction world is seeded once (on the first
   // snapshot that carries this player, in handleSnapshot below) and simply
@@ -118,6 +140,11 @@ class Client {
   // synced to authority going forward.
   void setPredictionEnabled(bool on) noexcept { prediction_enabled_ = on; }
   bool predictionEnabled() const noexcept { return prediction_enabled_; }
+
+  // A pure toggle, same style as prediction/interpolation: sendInput simply
+  // stamps view_tick = 0 (uncompensated) while off.
+  void setLagCompensationEnabled(bool on) noexcept { lag_compensation_enabled_ = on; }
+  bool lagCompensationEnabled() const noexcept { return lag_compensation_enabled_; }
 
   // Input-to-snapshot latency: the time from sending an input to the
   // snapshot that acknowledges it. This is NOT a pure network round trip --
@@ -130,6 +157,12 @@ class Client {
   uint32_t rttMs() const noexcept { return rtt_ms_; }
 
   const PredictionStats& predictionError() const noexcept { return stats_; }
+
+  // HUD-only state: nothing here feeds prediction, clock sync, or anything
+  // sent -- a confirmed hit is purely a fact this client is told about.
+  uint32_t hitsConfirmed() const noexcept { return hits_confirmed_; }
+  uint32_t lastHitTarget() const noexcept { return last_hit_target_; }
+  uint32_t lastHitFireTick() const noexcept { return last_hit_fire_tick_; }
 
   // The local player's position: predicted when prediction is on and the
   // prediction world has been seeded, otherwise straight from the newest
@@ -157,7 +190,43 @@ class Client {
     return false;
   }
 
+  // The position to draw a REMOTE player at: interpolated when interpolation
+  // is on, the raw newest snapshot when it is off. False for the local
+  // player id (that one is predicted -- see localPosition) and for an
+  // unknown player.
+  bool remotePosition(uint32_t player_id, float& x, float& y) const noexcept {
+    if (player_id == player_id_ || player_id == sim::kInvalidPlayerId) return false;
+    if (interpolation_enabled_) return interp_.sample(snapshots_, player_id, x, y);
+    for (uint32_t i = 0; i < snapshot_.count; ++i) {
+      if (snapshot_.players[i].id == player_id) {
+        x = snapshot_.players[i].x;
+        y = snapshot_.players[i].y;
+        return true;
+      }
+    }
+    return false;
+  }
+
  private:
+  // The tick whose world remotePosition drew this frame -- the same rule
+  // remotePosition itself applies, so the server's rewind reproduces exactly
+  // what this client rendered (net::samplePlayerAt is the shared mechanism;
+  // this just names which tick to sample it at). 0 (uncompensated) when lag
+  // compensation is off, no snapshot has ever been held, or interpolation is
+  // on but its timeline hasn't been seeded yet -- each of those is a case
+  // remotePosition itself has no usable answer for either. The starved case
+  // (interpolating past the newest snapshot) clamps to latest_snapshot_tick_
+  // rather than the render tick that has run ahead of it: samplePlayerAt
+  // freezes at the newest snapshot in that case too, so this is still the
+  // tick whose drawn position matches.
+  uint32_t viewTickForThisFrame() const noexcept {
+    if (!lag_compensation_enabled_) return 0;
+    if (latest_snapshot_tick_ == 0) return 0;
+    if (!interpolation_enabled_) return latest_snapshot_tick_;
+    if (!interp_.haveTimeline()) return 0;
+    return std::min(interp_.renderTick(), latest_snapshot_tick_);
+  }
+
   void handlePacket(const net::PacketSlot& slot, uint32_t now_ms) noexcept {
     // A UDP socket is unconnected -- tryReceive() hands back a datagram
     // from any source that reached this port, not just the joined server.
@@ -188,9 +257,24 @@ class Client {
       case net::MsgType::kSnapshot:
         handleSnapshot(r, h, now_ms);
         break;
+      case net::MsgType::kSnapshotDelta:
+        handleSnapshotDelta(r, h, now_ms);
+        break;
+      case net::MsgType::kHitConfirm:
+        handleHitConfirm(r);
+        break;
       default:
         break;
     }
+  }
+
+  void handleHitConfirm(net::ByteReader& r) noexcept {
+    if (state_ != State::kJoined) return;
+    net::HitConfirm hc{};
+    if (!net::decodeHitConfirm(r, hc)) return;
+    ++hits_confirmed_;
+    last_hit_target_ = hc.target_id;
+    last_hit_fire_tick_ = hc.fire_tick;
   }
 
   void handleJoinAccept(net::ByteReader& r, const net::PacketHeader& h, uint32_t now_ms) noexcept {
@@ -226,14 +310,48 @@ class Client {
     sim::WorldSnapshot snap{};
     if (!net::decodeSnapshot(r, snap)) return;
     ++snapshots_received_;
+    acceptSnapshot(snap, h, now_ms);
+  }
+
+  void handleSnapshotDelta(net::ByteReader& r, const net::PacketHeader& h,
+                            uint32_t now_ms) noexcept {
+    net::SnapshotDelta d{};
+    if (!net::decodeSnapshotDelta(r, d)) return;
+    const sim::WorldSnapshot* baseline = snapshots_.find(d.baseline_tick);
+    if (baseline == nullptr) {
+      ++deltas_dropped_;
+      return;
+    }
+    sim::WorldSnapshot reconstructed{};
+    if (!net::applySnapshotDelta(*baseline, d, reconstructed)) {
+      ++deltas_dropped_;
+      return;
+    }
+    ++deltas_applied_;
+    acceptSnapshot(reconstructed, h, now_ms);
+  }
+
+  // Shared acceptance tail for both a full snapshot and a reconstructed
+  // delta, so the two paths cannot silently drift -- duplicating this is
+  // how a delta-fed client would stop reconciling.
+  void acceptSnapshot(const sim::WorldSnapshot& snap, const net::PacketHeader& h,
+                       uint32_t now_ms) noexcept {
     // Newest wins: adopt only when strictly newer than what is already
-    // stored. A decode failure adopts nothing (handled by the early return
-    // above, before snapshots_received_ is incremented).
+    // stored.
     if (h.tick <= latest_snapshot_tick_) return;
+    // A legitimate server always encodes the payload's own tick from the
+    // same world_.tick() value as the header's tick field. snap.tick is
+    // what SnapshotRing::store keys this entry by, and what a later
+    // delta's baseline_tick is looked up against -- a decoupled pair
+    // would let a forged packet corrupt that keying (only reachable by
+    // forging the joined server's source address, an already-accepted
+    // precondition, but cheap to close regardless).
+    if (snap.tick != h.tick) return;
     snapshot_ = snap;
     latest_snapshot_tick_ = h.tick;
     server_time_ms_ = h.send_time_ms;
     clock_.observe(h.tick, h.ack_tick);
+    interp_.observe(h.tick);
 
     // ack_tick names an input this client sent and (if still pending) still
     // holds the send time for -- RTT is a subtraction, no wire round trip
@@ -255,6 +373,8 @@ class Client {
       }
       break;
     }
+
+    snapshots_.store(snapshot_);
   }
 
   // Adopts the authoritative state, then replays every pending input
@@ -339,6 +459,15 @@ class Client {
   bool prediction_enabled_ = true;
   uint32_t rtt_ms_ = 0;
   PredictionStats stats_;
+  net::SnapshotRing snapshots_;
+  uint32_t deltas_applied_ = 0;
+  uint32_t deltas_dropped_ = 0;
+  Interpolator interp_;
+  bool interpolation_enabled_ = true;
+  bool lag_compensation_enabled_ = true;
+  uint32_t hits_confirmed_ = 0;
+  uint32_t last_hit_target_ = 0;
+  uint32_t last_hit_fire_tick_ = 0;
 };
 
 }  // namespace client

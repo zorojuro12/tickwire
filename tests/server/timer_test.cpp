@@ -14,10 +14,27 @@
 #include <gtest/gtest.h>
 
 #include "net/udp.h"
+#include "server/clock.h"
 #include "server/poll_set.h"
 
 namespace server {
 namespace {
+
+TEST(MonotonicNsTest, IsMonotonicAndFinerGrainedThanMilliseconds) {
+  const uint64_t first = monotonicNs();
+  const uint64_t second = monotonicNs();
+  EXPECT_GE(second, first);
+  EXPECT_LT(second - first, 1'000'000'000ull);
+
+  bool saw_sub_millisecond_gap = false;
+  uint64_t prev = monotonicNs();
+  for (int i = 0; i < 1000; ++i) {
+    const uint64_t now = monotonicNs();
+    if (now - prev < 1'000'000ull) saw_sub_millisecond_gap = true;
+    prev = now;
+  }
+  EXPECT_TRUE(saw_sub_millisecond_gap);
+}
 
 TEST(TickTimerTest, FiresAtItsConfiguredRateAndClosesItself) {
   TickTimer t(1000);  // 1 kHz, 1 ms period

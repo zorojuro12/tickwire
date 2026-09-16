@@ -201,5 +201,54 @@ TEST(ConvergenceTest, PredictionRemovesTheVisibleLagAt200ms) {
   EXPECT_LT(predicting_error, unpredicting_error);
 }
 
+TEST(ConvergenceTest, ClientTracksServerOverADeltaStream) {
+  constexpr net::Endpoint kClientEp{0x7F000001u, 0x3110u};
+  constexpr net::Endpoint kServerEp{0x7F000001u, 0x3111u};
+
+  auto client_tp = std::make_unique<net::LoopbackTransport>(kClientEp);
+  auto server_tp = std::make_unique<net::LoopbackTransport>(kServerEp);
+  client_tp->connect(*server_tp);
+
+  auto srv = std::make_unique<server::Server<net::LoopbackTransport>>(*server_tp);
+  auto c = std::make_unique<Client<net::LoopbackTransport>>(*client_tp, kServerEp);
+  c->beginJoin(0);
+
+  for (int i = 0; i < 300; ++i) {
+    const uint32_t now_ms = static_cast<uint32_t>(i) * 16;
+    srv->ingest();
+    srv->tick(now_ms);
+    c->tick(now_ms);
+    if (c->state() == State::kJoined) {
+      c->sendInput(now_ms, 1.0f, 0.0f, 0.0f, 0.0f, false);
+    }
+  }
+
+  ASSERT_EQ(c->state(), State::kJoined);
+
+  EXPECT_GT(srv->deltasSent(), srv->keyframesSent());
+  EXPECT_GT(c->deltasApplied(), 0u);
+  EXPECT_EQ(c->deltasDropped(), 0u);
+
+  const sim::PlayerState* client_player = nullptr;
+  for (uint32_t i = 0; i < c->latestSnapshot().count; ++i) {
+    if (c->latestSnapshot().players[i].id == c->playerId()) {
+      client_player = &c->latestSnapshot().players[i];
+    }
+  }
+  ASSERT_NE(client_player, nullptr);
+
+  sim::WorldSnapshot snap{};
+  srv->world().writeSnapshot(snap);
+  const sim::PlayerState* server_player = nullptr;
+  for (uint32_t i = 0; i < snap.count; ++i) {
+    if (snap.players[i].id == c->playerId()) server_player = &snap.players[i];
+  }
+  ASSERT_NE(server_player, nullptr);
+
+  constexpr float kSteadyStateBound = 1.0f;
+  EXPECT_LT(std::hypot(client_player->x - server_player->x, client_player->y - server_player->y),
+            kSteadyStateBound);
+}
+
 }  // namespace
 }  // namespace client

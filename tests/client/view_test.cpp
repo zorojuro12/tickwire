@@ -19,24 +19,49 @@ uint32_t bits(float f) {
 
 TEST(ViewTest, WorldToScreenMapsCornersAndCentreExactly) {
   constexpr float kSide = 800.0f;
+  const Camera cam{0.0f, 0.0f, 1.0f};
 
-  ScreenPos centre = worldToScreen(0.0f, 0.0f, kSide, 0.0f, 0.0f);
+  ScreenPos centre = worldToScreen(0.0f, 0.0f, kSide, cam);
   EXPECT_EQ(centre.x, 400.0f);
   EXPECT_EQ(centre.y, 400.0f);
 
-  ScreenPos top_left = worldToScreen(-sim::kArenaHalf, sim::kArenaHalf, kSide, 0.0f, 0.0f);
+  ScreenPos top_left = worldToScreen(-sim::kArenaHalf, sim::kArenaHalf, kSide, cam);
   EXPECT_EQ(top_left.x, 0.0f);
   EXPECT_EQ(top_left.y, 0.0f);
 
-  ScreenPos bottom_right = worldToScreen(sim::kArenaHalf, -sim::kArenaHalf, kSide, 0.0f, 0.0f);
+  ScreenPos bottom_right = worldToScreen(sim::kArenaHalf, -sim::kArenaHalf, kSide, cam);
   EXPECT_EQ(bottom_right.x, 800.0f);
   EXPECT_EQ(bottom_right.y, 800.0f);
 
-  ScreenPos offset_centre = worldToScreen(0.0f, 0.0f, kSide, 100.0f, 50.0f);
-  EXPECT_EQ(offset_centre.x, 500.0f);
-  EXPECT_EQ(offset_centre.y, 450.0f);
+  EXPECT_EQ(worldToScreenRadius(sim::kPlayerRadius, kSide, 1.0f), 4.0f);
+}
 
-  EXPECT_EQ(worldToScreenRadius(sim::kPlayerRadius, kSide), 4.0f);
+TEST(ViewTest, ZoomedCameraCentresOnItsTargetAndInvertsExactly) {
+  constexpr float kSide = 800.0f;
+  const Camera cam{-30.0f, -30.0f, 4.0f};
+
+  ScreenPos centre = worldToScreen(-30.0f, -30.0f, kSide, cam);
+  EXPECT_EQ(centre.x, 400.0f);
+  EXPECT_EQ(centre.y, 400.0f);
+
+  ScreenPos right = worldToScreen(-25.0f, -30.0f, kSide, cam);
+  EXPECT_EQ(right.x, 560.0f);
+  EXPECT_EQ(right.y, 400.0f);
+
+  ScreenPos up = worldToScreen(-30.0f, -25.0f, kSide, cam);
+  EXPECT_EQ(up.x, 400.0f);
+  EXPECT_EQ(up.y, 240.0f);
+
+  EXPECT_EQ(worldToScreenRadius(sim::kPlayerRadius, kSide, 4.0f), 16.0f);
+
+  float wx = 0.0f, wy = 0.0f;
+  screenToWorld(560.0f, 240.0f, kSide, cam, wx, wy);
+  EXPECT_EQ(wx, -25.0f);
+  EXPECT_EQ(wy, -25.0f);
+
+  screenToWorld(0.0f, 0.0f, kSide, Camera{0.0f, 0.0f, 1.0f}, wx, wy);
+  EXPECT_EQ(wx, -sim::kArenaHalf);
+  EXPECT_EQ(wy, sim::kArenaHalf);
 }
 
 TEST(ViewTest, AimFromCursorNormalizesAndRejectsDegenerateInputs) {

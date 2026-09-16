@@ -32,13 +32,20 @@ phase, right before that phase's branch starts, to break one phase into numbered
 tasks with exact files, interfaces, and test → implement → verify → commit steps.
 **Don't re-run `/impl-plan` per phase.**
 
-> **Status: `/impl-plan` has NOT been run for Tickwire.** The P0–P7 table currently
-> exists only as a table inside the design doc. It needs to become a real
-> implementation plan that resolves the open architectural questions before P0's
-> phase plan is written — `libsim`'s exact API surface and link model, fixed-point
-> vs floats, the transport interface shape, and the queue's memory-ordering
-> contract. Those are architecture, not execution, and answering them inside a
-> phase plan is how they get answered badly.
+> **Status: the architectural layer is DONE — don't re-run it.** (This block read
+> *"`/impl-plan` has NOT been run for Tickwire"* until 2026-09-11; it was written
+> before P0 and went stale immediately.) Its output is
+> [`docs/specs/2026-09-04-architecture-resolution.md`](specs/2026-09-04-architecture-resolution.md),
+> which `CLAUDE.md` names authoritative for every architectural decision. All five
+> questions it was meant to resolve are answered there: `libsim`'s API surface and
+> link model (§ Q2), fixed-point vs floats (§ Q1), the transport interface shape
+> (§ Q3), the queue's memory-ordering contract (§ Q4 — **fixed at P0 specifically
+> so P5 measures synchronization cost rather than a design mistake made under
+> benchmark pressure**), and the toolchain/container decision (§ Q5).
+>
+> A phase therefore starts at `writing-plans`, not `/impl-plan`. Reopen the
+> architectural layer only for a genuinely new question no § Q answer covers — and
+> record that as a pivot in `docs/project-history.md`, not as a quiet amendment.
 
 Plans live in **`docs/plans/`**, named `YYYY-MM-DD-phase-N-slug.md`.
 
@@ -104,6 +111,12 @@ staple skills (`agentic-engineering`, `ai-first-engineering`,
 `cpp-build-resolver`; the 14 Bucket-1 staple commands plus `/cpp-build`,
 `/cpp-test`, `/cpp-review`, `/project-init`.
 
+**Added since:** `benchmark-optimization-loop` (2026-09-11, start of P5 — see
+§3a). Nothing else has been imported in P1–P4; both rule packs
+(`rules/ecc/common/`, `rules/ecc/cpp/`) are still byte-identical to their ECC
+source, and no other ECC rule pack applies to this stack (every remaining one
+targets a language or framework Tickwire doesn't use).
+
 ### 3a. Phase-by-phase import map
 
 Cross-referenced against `~/projects/ecc-survey.md`'s three-bucket skill/agent/
@@ -115,13 +128,46 @@ already installed, so this table shrinks over time rather than restating 3's
 |---|---|---|
 | P1 — wire protocol, serialization, transport | Nothing new. `security-review` (already installed) is the applicable skill the moment untrusted-input parsing exists — no ECC skill covers binary-protocol design specifically. | — |
 | P2 — authoritative server, raylib client, first demo | `docker-patterns` skill | Once the server is packaged as a container for the demo/README, not before — P0's `Dockerfile` is a *dev toolchain* image, not the shipped artifact, so this wasn't a P0 need. |
-| P2 — raylib integration specifically | `documentation-lookup` skill + `docs-lookup` agent (Context7 MCP) | First external-library integration in the project (raylib). Pull in when starting that work, not before — nothing to look up yet. |
+| ~~P2 — raylib integration specifically~~ | ~~`documentation-lookup` skill + `docs-lookup` agent (Context7 MCP)~~ **Row closed 2026-09-11, not imported.** | Trigger did fire at P2 and was missed at the time, but both are inert here: **no Context7 MCP server is configured** (global and project `mcpServers` are both empty), and that MCP is the skill's entire mechanism. raylib integration is also complete, and no P5–P7 phase adds an external library. Reopen only if an MCP is configured *and* a new library integration starts. |
 | P3 — prediction/reconciliation/clock-sync | Nothing available. No ECC skill covers netcode-specific prediction/reconciliation; the design doc already names the correct references (Gaffer On Games, Valve Source Multiplayer Networking) instead of a packaged skill. | — (confirmed gap, not an oversight) |
 | P4 — entity interpolation, snapshot delta | Nothing available, same reason as P3. | — |
-| P5 — threading + lock-free SPSC queue benchmark, headline numbers table | **`benchmark`, `benchmark-methodology`, `benchmark-optimization-loop` skills** (Bucket 3, meta/orchestration) | Start of P5 — this is the clearest concrete gap in the whole map. P5's entire purpose is producing the tick-jitter/throughput numbers table; `performance-optimizer` (already installed) profiles, but these three skills are what structure the benchmark methodology and its optimization loop. |
+| P5 — threading + lock-free SPSC queue benchmark, headline numbers table | **`benchmark-optimization-loop` skill — imported 2026-09-11.** Its two companions named here originally were rejected on reading them; see the correction note below the table. | Fired at start of P5. `performance-optimizer` (already installed) profiles; this skill is what bounds the mutex-vs-lock-free variant search and gates promotion. |
 | P6 — lag compensation | Nothing available — domain-specific, external references again. | — |
 | P7 — stretch (io_uring / WebSocket gateway) | Nothing available — no ECC skill for io_uring or raw WebSocket protocol work. | — |
-| Any phase, once `.claude/` surface has grown | `security-scan` **skill** (distinct from the already-installed `/security-scan` **command** — the skill audits `.claude/` config itself for misconfig/leaked secrets; the command audits code) | Optional hygiene layer, not urgent — worth adding once the agent/skill/command surface is large enough that a misconfiguration would be easy to miss by eye. |
+| ~~Any phase, once `.claude/` surface has grown~~ | ~~`security-scan` **skill**~~ **Row closed 2026-09-11, not imported — the distinction this row asserted is false.** | The row claimed the skill audits `.claude/` config while the command audits code. Checked both: the installed `/security-scan` command's own frontmatter reads *"Run AgentShield against agent, hook, MCP, permission, and secret surfaces"* and shells out to the same `npx ecc-agentshield scan` engine the skill does. Same target, same tool — importing the skill is pure redundancy. The hygiene need is real and already covered; run the command. |
+
+**Correction, 2026-09-11 — this table's rows were written from skill *names*, not
+from reading the skills.** Cross-referencing `~/projects/ecc-survey.md`'s
+inventory gave names and bucket numbers; nobody opened the `SKILL.md` files. At
+the start of P5 all remaining actionable rows were checked against actual
+content, and **three of four were wrong** — two rejections and one false
+distinction, all recorded above. The one that matters most:
+
+- **`benchmark-methodology` is not a performance skill at all.** Its real
+  description: *"Use after `competitive-platform-analysis` has produced a tiered
+  competitor set. Scores each competitor across nine weighted dimensions
+  (positioning, voice, visual craft, offer packaging, ...)"* — competitive
+  marketing analysis, sitting between two other marketing skills. It matched P5
+  on the word "benchmark" and nothing else.
+- **`benchmark` is web/cloud-only.** All four of its modes: Core Web Vitals via
+  browser MCP, HTTP endpoint p50/p95/p99, JS/TS/Docker build times, and a
+  before/after page-weight table. Nothing addresses an in-process 60 Hz tick
+  loop or a queue handoff. The single transferable idea (save a baseline, compare
+  after) is one sentence, not an import.
+- **`latency-critical-systems` was not in this table and was evaluated anyway**,
+  since its description (p95 latency, hot paths, queues) reads like a direct hit.
+  Rejected: its hot-path model is `provider API → ingest worker → queue → cache →
+  edge route → browser render`, and its optimization order is about round trips
+  and cache freshness. Only its "Split The Metrics" list transfers, and the
+  design doc already fixes Tickwire's four metrics precisely.
+
+**The hazard, stated for transfer:** *an import map built from a name inventory
+recommends skills that don't do what their names imply, and the cost is only
+discovered at the phase that depends on them.* Carrying an import map into
+another project means re-reading each candidate's actual description at import
+time — the survey tells you what **exists**, never whether it **applies**. This
+is the same class of finding as the false-green rule in §9 below: a step that
+reports success without having done the thing it claims.
 
 **Confirmed not applicable — don't re-litigate these:** `api-design` (no REST
 surface, raw UDP), `e2e-testing`/`e2e-runner` (Playwright, browser-only — the
@@ -268,21 +314,36 @@ Re-derived against Tickwire's conditions. **Reasoning is portable; verdicts are 
 | Spec-driven vs code-driven plans | **Undecided — per-plan fork** | A phase delegates tasks; delegated tasks want pre-written code |
 | `subagent-driven-development` | Declined — the objection is its ceremony, not delegation. `delegating-plan-tasks` covers delegation without it | The ceremony starts paying for itself |
 | `continuous-learning-v2` | Installed but **dormant** | Re-read CallIt's guide §9 before enabling |
-| Promoting adapted rules to `~/projects/claude-skills/` | **Not doing it** — user decision, 2026-09-04 | — |
+| Promoting adapted rules to `~/projects/claude-skills/` | **Not doing it** — user decision, 2026-09-04 | A rule is provably lost translating into a *new* project. Happened once already (2026-09-11, the false-green rule below) — but it was lost translating *out of* CallIt, which promotion would not have prevented, so the verdict stands. Re-run it if a rule is lost translating out of the **library** itself |
 
 ### Skill adaptation record
 
-`writing-plans` here is the **library** version (`~/projects/claude-skills/`) plus
-two rules that CallIt invented after that library snapshot was taken and never
-promoted back:
+`writing-plans` here is the **library** version (`~/projects/claude-skills/`)
+plus rules CallIt invented after that library snapshot was taken and never
+promoted back, plus one this project earned.
 
-1. **2-step checkpoints with `&&` commit chaining** (library still had the 5-step
-   form with commit as its own step)
-2. **The `## Test Commands` scoping section** (absent from the library entirely)
+**Record each rule by the hazard it prevents, not by its wording.** This is the
+form, and it exists because the previous form failed: the `-count=1` entry below
+used to read *"doesn't transfer — `go test` caches, CTest does not — so only the
+scoping half survives."* That is accurate, and the rule was still lost. Stated as
+a wording diff, "caching doesn't apply here" ends the thought. Stated as a
+hazard — *the runner reports green without having run the new test* — it forces
+the next question, "then what is **this** runner's route to a false green?", and
+the answer (a stale binary, because `ctest` does not build) is a rule worth as
+much as the original. Carrying these to a future project means re-deriving the
+**Prevents** column against that stack, not editing the **Rule** column.
 
-It also **keeps `Checkpoint falsifiability`**, a self-review check the library has
-and CallIt's copy dropped. So this copy is stronger than either source.
+| Rule | Prevents (the hazard) | Translating it elsewhere |
+|---|---|---|
+| 2-step checkpoints, commit chained with `&&` | A commit landing on a red test. As its own step a commit after a failure is merely inadvisable; chained, it is unreachable | Any VCS and runner. Chain, never sequence — `;` and separate lines both lose the property |
+| `## Test Commands` scoping | Hours burned running a full suite inside every one of ~35 checkpoints | Whatever the runner's scoping flag is (`-R`, `-k`, a package path) |
+| **No false green** — always `cmake --build` before `ctest` | The runner reporting PASS without ever executing the newly written test. Two known mechanisms: a **cached** result (Go — hence `-count=1`), and a **stale binary** because the runner does not build (CTest). A third, CTest-specific: `ctest -R` matching no target at all still exits 0 | Ask what this runner's route to a false green is. Enumerate caching, stale build artifacts, and no-match-exits-zero before concluding there isn't one |
+| Keeps `Checkpoint falsifiability` (library has it; CallIt's copy dropped it) | Checkpoints that are unfalsifiable by construction, which contradict their own "expect FAIL" step and stall a cold executor | Universal — it is about test design, not tooling |
 
-One rule was adapted rather than translated: both sources say *"include the flag
-that defeats cached results (`-count=1` in Go)."* That doesn't transfer — `go test`
-caches, CTest does not — so only the scoping half survives here.
+The false-green rule was found on 2026-09-11 while writing the P4 plan, after
+the P3 plan had used a bare `ctest` at all 35 of its checkpoints while asserting
+"Expected: FAIL — compile error", an outcome bare `ctest` cannot produce. P3's
+committed code was verified green against freshly built binaries, so nothing was
+actually broken — what was lost was the evidence that its red steps were ever
+red. The rule now lives in `CLAUDE.md`'s Build and test section (so every session
+gets it, not just plan-writing ones) and in this project's copy of the skill.

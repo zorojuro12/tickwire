@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(tickwire CXX)
 
+find_package(Threads REQUIRED)
+
 include(FetchContent)
 FetchContent_Declare(googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
@@ -23,13 +25,13 @@ add_library(libsim STATIC src/sim/sim.cpp src/sim/world.cpp)
 target_include_directories(libsim PUBLIC src)
 target_link_libraries(libsim PUBLIC tickwire_sim_flags)
 
-add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp)
+add_library(libnet STATIC src/net/bytes.cpp src/net/protocol.cpp src/net/framing.cpp src/net/loopback.cpp src/net/udp.cpp src/net/snapshot_ring.cpp src/net/snapshot_delta.cpp)
 target_link_libraries(libnet PUBLIC libsim)
 
-add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp)
-target_link_libraries(libserver PUBLIC libnet)
+add_library(libserver STATIC src/server/session.cpp src/server/clock.cpp src/server/tick_timer.cpp src/server/poll_set.cpp src/server/input_buffer.cpp src/server/rewind.cpp)
+target_link_libraries(libserver PUBLIC libnet Threads::Threads)
 
-add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp)
+add_library(libclient STATIC src/client/view.cpp src/client/clock_sync.cpp src/client/prediction.cpp src/client/interpolation.cpp)
 target_include_directories(libclient PUBLIC src)
 target_link_libraries(libclient PUBLIC libnet)
 
@@ -57,16 +59,27 @@ tw_add_test(udp_test tests/net/udp_test.cpp)
 tw_add_test(simulated_test tests/net/simulated_test.cpp)
 tw_add_test(robustness_test tests/net/robustness_test.cpp)
 tw_add_test(framing_test tests/net/framing_test.cpp)
+tw_add_test(snapshot_ring_test tests/net/snapshot_ring_test.cpp)
+tw_add_test(snapshot_delta_test tests/net/snapshot_delta_test.cpp)
 tw_add_test(packet_ring_test tests/server/packet_ring_test.cpp)
 tw_add_test(session_test tests/server/session_test.cpp)
+tw_add_test(rewind_test tests/server/rewind_test.cpp)
 tw_add_test(input_buffer_test tests/server/input_buffer_test.cpp)
 tw_add_test(server_test tests/server/server_test.cpp)
+tw_add_test(server_lagcomp_test tests/server/server_lagcomp_test.cpp)
 tw_add_test(timer_test tests/server/timer_test.cpp)
+tw_add_test(jitter_stats_test tests/server/jitter_stats_test.cpp)
+tw_add_test(mutex_ring_test tests/server/mutex_ring_test.cpp)
+tw_add_test(spsc_ring_test tests/server/spsc_ring_test.cpp)
+tw_add_test(threaded_runner_test tests/server/threaded_runner_test.cpp)
 tw_add_test(client_test tests/client/client_test.cpp)
+tw_add_test(client_lagcomp_test tests/client/client_lagcomp_test.cpp)
+tw_add_test(lagcomp_hitrate_test tests/client/lagcomp_hitrate_test.cpp)
 tw_add_test(clock_sync_test tests/client/clock_sync_test.cpp)
 tw_add_test(prediction_test tests/client/prediction_test.cpp)
 tw_add_test(convergence_test tests/client/convergence_test.cpp)
 tw_add_test(view_test tests/client/view_test.cpp)
+tw_add_test(interpolation_test tests/client/interpolation_test.cpp)
 
 if(TW_SANITIZER MATCHES "address")
   add_executable(fault_uaf tests/faults/uaf.cpp)
@@ -88,6 +101,12 @@ if(TW_SANITIZER MATCHES "thread")
   add_test(NAME tsan_detects_race COMMAND fault_race)
   set_tests_properties(tsan_detects_race PROPERTIES
     PASS_REGULAR_EXPRESSION "data race")
+
+  add_executable(fault_relaxed_ring tests/faults/relaxed_ring.cpp)
+  target_link_libraries(fault_relaxed_ring PRIVATE tickwire_sim_flags Threads::Threads)
+  add_test(NAME tsan_detects_relaxed_ring COMMAND fault_relaxed_ring)
+  set_tests_properties(tsan_detects_relaxed_ring PROPERTIES
+    PASS_REGULAR_EXPRESSION "data race")
 endif()
 
 add_executable(tw_server apps/tw_server.cpp)
@@ -96,9 +115,39 @@ add_test(NAME server_app_runs COMMAND tw_server --port 0 --ticks 5)
 set_tests_properties(server_app_runs PROPERTIES PASS_REGULAR_EXPRESSION "ticks=5")
 add_test(NAME server_app_bogus_arg COMMAND tw_server --bogus)
 set_tests_properties(server_app_bogus_arg PROPERTIES WILL_FAIL TRUE)
+add_test(NAME server_app_threads1 COMMAND tw_server --port 0 --ticks 5 --threads 1)
+set_tests_properties(server_app_threads1 PROPERTIES PASS_REGULAR_EXPRESSION "threads=1")
+add_test(NAME server_app_lagcomp_counters COMMAND tw_server --port 0 --ticks 5)
+set_tests_properties(server_app_lagcomp_counters PROPERTIES
+  PASS_REGULAR_EXPRESSION "rewound_shots=0 rewinds_rejected=0")
+add_test(NAME server_app_threads2_spsc COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring spsc)
+set_tests_properties(server_app_threads2_spsc PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=spsc")
+add_test(NAME server_app_threads2_mutex COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring mutex)
+set_tests_properties(server_app_threads2_mutex PROPERTIES PASS_REGULAR_EXPRESSION "threads=2 ring=mutex")
+add_test(NAME server_app_batch_ingest
+  COMMAND tw_server --port 0 --ticks 5 --threads 2 --ring spsc --batch-ingest)
+set_tests_properties(server_app_batch_ingest PROPERTIES PASS_REGULAR_EXPRESSION "batch_ingest=1")
+add_test(NAME server_app_sim_load
+  COMMAND tw_server --port 0 --ticks 20 --threads 2 --ring spsc --sim-load-us 20000)
+# CMake's built-in regex engine has no {n} bounded-repetition support, so the
+# plan's `[0-9]{6}` is expanded here to six literal [0-9] terms with the same
+# meaning: a p50 of >= 17'000'000 ns (8-9 digits, leading "17"-"19" or "2"-"9").
+set_tests_properties(server_app_sim_load PROPERTIES
+  PASS_REGULAR_EXPRESSION "jitter_ns p50=(1[7-9]|[2-9][0-9])[0-9][0-9][0-9][0-9][0-9][0-9]")
+add_test(NAME server_app_fixed_port COMMAND tw_server --port 41237 --ticks 5)
+set_tests_properties(server_app_fixed_port PROPERTIES PASS_REGULAR_EXPRESSION "port=41237\n")
 
 add_executable(tw_loadclient apps/tw_loadclient.cpp)
 target_link_libraries(tw_loadclient PRIVATE libclient libserver)
+
+add_test(NAME loadclient_sweep_ticks_zero_rejected
+  COMMAND tw_loadclient --host 127.0.0.1 --port 1 --sweep-ticks 0)
+set_tests_properties(loadclient_sweep_ticks_zero_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "--sweep-ticks must be >= 1")
+add_test(NAME loadclient_sweep_ticks_negative_rejected
+  COMMAND tw_loadclient --host 127.0.0.1 --port 1 --sweep-ticks -5)
+set_tests_properties(loadclient_sweep_ticks_negative_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "--sweep-ticks must be >= 1")
 
 add_test(NAME e2e_udp
   COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/e2e-udp.sh"
@@ -109,6 +158,27 @@ add_test(NAME e2e_udp
 # overridden by a regex match elsewhere in the output. Exit code alone
 # (set -e/pipefail in the script, plus tw_loadclient's own
 # joined==players return value) is the pass/fail signal here.
+
+add_executable(lagcomp_probe tools/lagcomp_probe.cpp)
+target_link_libraries(lagcomp_probe PRIVATE libserver libclient)
+add_test(NAME lagcomp_probe_smoke COMMAND lagcomp_probe)
+set_tests_properties(lagcomp_probe_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "topology=test reverse_ticks=120 axis=y aim_sigma=0.00 on=")
+
+add_executable(bench_queue tools/bench_queue.cpp)
+target_link_libraries(bench_queue PRIVATE libserver)
+add_test(NAME bench_queue_spsc COMMAND bench_queue --ring spsc --items 10000 --rate 0)
+set_tests_properties(bench_queue_spsc PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+add_test(NAME bench_queue_mutex COMMAND bench_queue --ring mutex --items 10000 --rate 0)
+set_tests_properties(bench_queue_mutex PROPERTIES PASS_REGULAR_EXPRESSION "ns_per_handoff_p50=[0-9]")
+
+add_test(NAME bench_smoke
+  COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/bench.sh" --smoke
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# No PASS_REGULAR_EXPRESSION, per the same reasoning as e2e_udp: that
+# property replaces the exit code as CTest's sole pass/fail signal once set,
+# which would mask a set -e failure inside the script. Exit code alone is the
+# signal here.
 
 add_executable(digest_dump_a tools/digest_dump.cpp)
 target_link_libraries(digest_dump_a PRIVATE libsim)

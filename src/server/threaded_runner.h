@@ -1,0 +1,148 @@
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <span>
+#include <thread>
+#include <utility>
+
+#include "net/transport.h"
+#include "server/jitter_stats.h"
+#include "server/poll_set.h"
+#include "server/server.h"
+#include "server/tick_timer.h"
+
+namespace server {
+
+// Splits Server<T, Ring>'s I/O and simulation across two real threads, along
+// the existing ingest()/tick() seam. The I/O thread owns ingest(); the sim
+// loop runs on the thread that calls run(), which stays synchronous (no
+// separate join() needed in the caller's happy path) and joins the I/O
+// thread before returning.
+//
+// What's shared between the threads: only `ring_` inside Server (the reason
+// Ring is swappable) and the transport, which needs no mutex -- send() and
+// tryReceive() touch only the fd and mutate no shared member state, and
+// POSIX allows concurrent sendto/recvfrom on one socket. `world_`, `sessions_`,
+// `inputs_`, and every counter tick() itself updates are touched only by the
+// calling thread; `ingest_overflows_` is the one Server counter the I/O
+// thread writes instead, via ingest()/ingestBatch() -- still single-writer,
+// still read only after both threads have joined (never concurrently with
+// the write), so it needs no atomic either. `packets_ingested_` here follows
+// the same rule: written only by the I/O thread, read only after both
+// threads have joined. Only `stop_` does need one, since it's the one flag
+// both threads touch concurrently.
+template <net::Transport T, typename Ring, size_t JitterSamples = 65536>
+class ThreadedRunner {
+ public:
+  // sim_load_us: synthetic per-tick busy-wait, applied via clock_ns() (never
+  // a direct wall-clock read, so this stays testable under an injected
+  // clock) after each tick() call. Zero -- the default -- costs nothing.
+  // batch: selects Server::ingestBatch() (recvmmsg) over ingest() on the I/O
+  // thread, for transports that support it -- ignored (never even
+  // considered) for one that doesn't, via the same if constexpr fork
+  // nativeHandle() already uses.
+  ThreadedRunner(Server<T, Ring>& srv, T& transport, uint32_t tick_hz,
+                 std::function<uint64_t()> clock_ns,
+                 std::function<uint32_t()> clock_ms, uint32_t sim_load_us = 0,
+                 bool batch = false) noexcept
+      : srv_(srv),
+        transport_(transport),
+        tick_hz_(tick_hz),
+        clock_ns_(std::move(clock_ns)),
+        clock_ms_(std::move(clock_ms)),
+        sim_load_us_(sim_load_us),
+        batch_(batch) {}
+
+  bool run(uint32_t ticks_limit) noexcept {
+    TickTimer timer(tick_hz_);
+    if (!timer.valid()) return false;
+
+    stop_.store(false, std::memory_order_relaxed);
+    ticks_run_ = 0;
+    packets_ingested_ = 0;
+    std::thread io_thread([this] { ioLoop(); });
+
+    PollSet sim_poll;
+    sim_poll.add(timer.fd(), 1);
+    std::array<uint32_t, 4> ready{};
+
+    uint64_t prev_ns = 0;
+    bool have_prev = false;
+    while (ticks_run_ < ticks_limit && !stop_.load(std::memory_order_relaxed)) {
+      const size_t n = sim_poll.wait(50, ready);
+      for (size_t i = 0; i < n && ticks_run_ < ticks_limit; ++i) {
+        if (ready[i] != 1) continue;
+        uint64_t expirations = timer.consumeExpirations();
+        while (expirations > 0 && ticks_run_ < ticks_limit) {
+          const uint64_t now_ns = clock_ns_();
+          if (have_prev) jitter_.record(now_ns - prev_ns);
+          prev_ns = now_ns;
+          have_prev = true;
+          srv_.tick(clock_ms_());
+          ++ticks_run_;
+          --expirations;
+          if (sim_load_us_ > 0) {
+            const uint64_t deadline_ns = clock_ns_() + static_cast<uint64_t>(sim_load_us_) * 1000ull;
+            while (clock_ns_() < deadline_ns) {
+            }
+          }
+        }
+      }
+    }
+
+    stop_.store(true, std::memory_order_relaxed);
+    io_thread.join();
+    return true;
+  }
+
+  void requestStop() noexcept { stop_.store(true, std::memory_order_relaxed); }
+
+  uint32_t ticksRun() const noexcept { return ticks_run_; }
+  JitterStats<JitterSamples>& jitter() noexcept { return jitter_; }
+  uint64_t packetsIngested() const noexcept { return packets_ingested_; }
+
+ private:
+  void ioLoop() noexcept {
+    if constexpr (requires { transport_.nativeHandle(); }) {
+      PollSet poll;
+      poll.add(transport_.nativeHandle(), 1);
+      std::array<uint32_t, 4> ready{};
+      while (!stop_.load(std::memory_order_relaxed)) {
+        const size_t n = poll.wait(50, ready);
+        for (size_t i = 0; i < n; ++i) packets_ingested_ += ingestOnce();
+      }
+    } else {
+      // LoopbackTransport has no pollable fd -- drain in a yield loop.
+      while (!stop_.load(std::memory_order_relaxed)) {
+        packets_ingested_ += srv_.ingest();
+        std::this_thread::yield();
+      }
+    }
+  }
+
+  size_t ingestOnce() noexcept {
+    if constexpr (requires { transport_.receiveBatch(std::declval<std::span<net::PacketSlot>>()); }) {
+      if (batch_) return srv_.ingestBatch();
+    }
+    return srv_.ingest();
+  }
+
+  Server<T, Ring>& srv_;
+  T& transport_;
+  uint32_t tick_hz_;
+  std::function<uint64_t()> clock_ns_;
+  std::function<uint32_t()> clock_ms_;
+  uint32_t sim_load_us_;
+  bool batch_;
+
+  std::atomic<bool> stop_{false};
+  uint32_t ticks_run_ = 0;
+  uint64_t packets_ingested_ = 0;
+  JitterStats<JitterSamples> jitter_;
+};
+
+}  // namespace server
