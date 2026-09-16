@@ -28,7 +28,7 @@ fi
 loadclient_out=$(mktemp)
 trap 'kill "${server_pid:-}" 2>/dev/null || true; rm -f "$server_out" "$loadclient_out"' EXIT
 
-"$loadclient_bin" --host 127.0.0.1 --port "$port" --players 4 --ticks 300 | tee "$loadclient_out"
+"$loadclient_bin" --host 127.0.0.1 --port "$port" --players 4 --ticks 300 --sweep-ticks 120 | tee "$loadclient_out"
 
 # The stats line (added at P3) must actually be printed, not just the
 # joined=<n> line CTest's own PASS_REGULAR_EXPRESSION checks -- catches the

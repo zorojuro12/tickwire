@@ -55,7 +55,9 @@ toggle's state is visible without reading the HUD, which also shows
 clients) similarly change color with interpolation (red while interpolating,
 orange while not) — with two clients open, one moving, watch the other's
 circle glide smoothly with interpolation on and visibly step at 20 Hz with it
-off. Closing the window leaves cleanly.
+off. Closing the window leaves cleanly. The camera follows your own player at
+4× zoom, so other players (spawned 10 units apart) stay in view, and the
+arena border scrolls into view near the edges.
 
 Headless, measured (not eyeballed) confirmation of the same claim: at a
 simulated 200ms round trip, the predicting client's on-screen position
@@ -73,20 +75,29 @@ loopback — same reason `demo.sh` runs everything in one call):
 
 ```bash
 scripts/tw bash -c "
-  build/gui/tw_server --port 41234 &
+  build/gui/tw_server --port 41234 & SRV=\$!
   sleep 1
-  build/gui/tw_loadclient --host 127.0.0.1 --port 41234 --players 1 --ticks 36000 &
+  build/gui/tw_loadclient --host 127.0.0.1 --port 41234 --players 1 --ticks 36000 --sweep-ticks 120 &
   build/gui/tw_client --host 127.0.0.1 --port 41234 --latency-ms 200
+  kill -INT \$SRV; wait \$SRV
 "
 ```
 
-`tw_loadclient`'s one bot sweeps back and forth along x. Move your player a
-few units above or below the bot's row and hold left click to aim at it —
-with `lagcomp=on` (the default) shots register against where you actually
-drew the bot; press `L` to switch to `lagcomp=off` and the same shots at the
-same aim mostly stop registering, since the target has since moved on from
-where it was drawn at 200ms of round-trip latency. A white ring flashes
-around the bot on a confirmed hit.
+The green dot is you, the red dot is the bot. Press `W` briefly to get above
+the bot's row, then position roughly over the middle of its sweep. Track the
+red dot with the cursor while holding left click, for about 15 seconds in
+each mode: with `lagcomp=on` (the default), the white ring flashes on most
+shots where the tracer was over the dot; press `L` to switch to
+`lagcomp=off` and the same tracking effort mostly stops registering, since
+the target has since moved on from where it was drawn at 200ms of
+round-trip latency; press `L` again and hits come back. On exit (the recipe
+above stops the server with `kill -INT` and waits for it, so the line
+prints), the server's final `lagcomp rewound_shots=… rewinds_rejected=…`
+line reports the session's totals.
+
+This demo is tuned for what a human eye can distinguish at typical mouse
+aim precision — see `tools/lagcomp_probe` for the measured hit-rate matrix
+behind the zoom level and bot sweep period chosen here.
 
 ## Measured results
 

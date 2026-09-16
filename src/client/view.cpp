@@ -6,14 +6,22 @@
 
 namespace client {
 
-ScreenPos worldToScreen(float wx, float wy, float side, float ox, float oy) noexcept {
-  const float scale = side / (2.0f * sim::kArenaHalf);
-  return ScreenPos{ox + (wx + sim::kArenaHalf) * scale, oy + (sim::kArenaHalf - wy) * scale};
+ScreenPos worldToScreen(float wx, float wy, float side, const Camera& cam) noexcept {
+  const float scale = side / (2.0f * sim::kArenaHalf) * cam.zoom;
+  return ScreenPos{side / 2.0f + (wx - cam.center_x) * scale,
+                    side / 2.0f - (wy - cam.center_y) * scale};
 }
 
-float worldToScreenRadius(float r, float side) noexcept {
-  const float scale = side / (2.0f * sim::kArenaHalf);
+float worldToScreenRadius(float r, float side, float zoom) noexcept {
+  const float scale = side / (2.0f * sim::kArenaHalf) * zoom;
   return r * scale;
+}
+
+void screenToWorld(float sx, float sy, float side, const Camera& cam, float& wx,
+                    float& wy) noexcept {
+  const float scale = side / (2.0f * sim::kArenaHalf) * cam.zoom;
+  wx = cam.center_x + (sx - side / 2.0f) / scale;
+  wy = cam.center_y - (sy - side / 2.0f) / scale;
 }
 
 void aimFromCursor(float px, float py, float cx, float cy, float& aim_x,

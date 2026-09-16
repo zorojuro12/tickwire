@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, handleSigint);
 
   auto transport = std::make_unique<net::UdpTransport>();
-  if (!transport->bind(htonl(INADDR_LOOPBACK), port)) {
+  if (!transport->bind(htonl(INADDR_LOOPBACK), htons(port))) {
     std::fprintf(stderr, "tw_server: failed to bind port %u\n", port);
     return 1;
   }
